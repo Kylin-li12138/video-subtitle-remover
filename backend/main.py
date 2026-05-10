@@ -212,37 +212,32 @@ class SubtitleRemover:
                             temp_frames.append(frame)
                         # ************ 读取该区间所有帧 end ************
                         if len(temp_frames) < 1:
-                            # 没有待处理，直接跳过
                             continue
                         elif len(temp_frames) == 1:
                             inner_index += 1
                             single_mask = create_mask(self.mask_size, sub_list[index])
                             inpainted_frame = self.lama_inpaint.inpaint(frame, single_mask)
                             self.video_writer.write(inpainted_frame)
-                            # self.append_output(f'write frame: {start_frame_no + inner_index} with mask {sub_list[start_frame_no]}')
+                            self.update_preview_with_comp(np.clip(frame+single_mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_frame)
                             self.update_progress(tbar, increment=1)
                             continue
                         else:
-                            # 将读取的视频帧分批处理
-                            # 1. 获取当前批次使用的mask
                             mask = create_mask(self.mask_size, sub_list[start_frame_no])
                             for batch in batch_generator(temp_frames, config.propainterMaxLoadNum.value):
-                                # 2. 调用批推理
                                 if len(batch) == 1:
                                     single_mask = create_mask(self.mask_size, sub_list[start_frame_no])
-                                    inpainted_frame = self.lama_inpaint.inpaint(frame, single_mask)
+                                    inpainted_frame = self.lama_inpaint.inpaint(batch[0], single_mask)
                                     self.video_writer.write(inpainted_frame)
-                                    # self.append_output(f'write frame: {start_frame_no + inner_index} with mask {sub_list[start_frame_no]}')
                                     inner_index += 1
+                                    self.update_preview_with_comp(np.clip(batch[0]+single_mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_frame)
                                     self.update_progress(tbar, increment=1)
                                 elif len(batch) > 1:
                                     inpainted_frames = propainter_inpaint(batch, mask)
                                     for i, inpainted_frame in enumerate(inpainted_frames):
                                         self.video_writer.write(inpainted_frame)
-                                        # self.append_output(f'write frame: {start_frame_no + inner_index} with mask {sub_list[index]}')
                                         inner_index += 1
                                         self.update_preview_with_comp(np.clip(batch[i]+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_frame)
-                                self.update_progress(tbar, increment=len(batch))
+                                        self.update_progress(tbar, increment=1)
 
     def sttn_auto_mode(self, tbar):
         """
