@@ -45,6 +45,7 @@ class SettingInterface(QtWidgets.QVBoxLayout):
     def __init__(self, parent):
         super().__init__()
         self._parent_widget = parent
+        self._home_interface = None
         self.setContentsMargins(16, 16, 16, 16)
         
         # 界面语言设置
@@ -156,10 +157,20 @@ class SettingInterface(QtWidgets.QVBoxLayout):
         if areas:
             self.template_applied.emit(areas)
 
+    def set_home_interface(self, home):
+        """由 HomeInterface 调用，传入自身引用"""
+        self._home_interface = home
+
     def _save_template(self):
         """保存当前选区为模板"""
-        home = self._find_home_interface()
-        if home is None:
+        home = self._home_interface
+        if home is None or not hasattr(home, 'video_display_component'):
+            InfoBar.error(
+                _tr_template("SaveFailed"),
+                "无法访问视频预览组件",
+                duration=3000,
+                parent=self._parent_widget
+            )
             return
 
         selections = home.video_display_component.selection_rects
@@ -190,6 +201,13 @@ class SettingInterface(QtWidgets.QVBoxLayout):
                 duration=3000,
                 parent=self._parent_widget
             )
+        else:
+            InfoBar.error(
+                _tr_template("SaveFailed"),
+                "写入模板文件失败，请检查目录权限",
+                duration=5000,
+                parent=self._parent_widget
+            )
 
     def _delete_template(self):
         """删除当前选中的模板"""
@@ -212,15 +230,6 @@ class SettingInterface(QtWidgets.QVBoxLayout):
                     duration=3000,
                     parent=self._parent_widget
                 )
-
-    def _find_home_interface(self):
-        """查找 HomeInterface 实例"""
-        widget = self._parent_widget
-        while widget is not None:
-            if hasattr(widget, 'video_display_component'):
-                return widget
-            widget = widget.parent() if hasattr(widget, 'parent') else None
-        return None
 
     def set_inpaint_mode_enabled(self, enabled):
         """启用或禁用 inpaint 模式下拉框"""

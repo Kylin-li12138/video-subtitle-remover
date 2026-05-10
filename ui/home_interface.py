@@ -116,6 +116,7 @@ class HomeInterface(QWidget):
         # 设置容器
         settings_container = CardWidget(self)
         self.setting_interface = SettingInterface(settings_container)
+        self.setting_interface.set_home_interface(self)
         self.setting_interface.template_applied.connect(self._apply_template)
         settings_container.setLayout(self.setting_interface)
         right_layout.addWidget(settings_container)

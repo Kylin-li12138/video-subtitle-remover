@@ -39,6 +39,9 @@ def is_video_or_image(filename):
 
 def merge_big_file_if_not_exists(dir, file, man_filename = None):
     if file not in os.listdir(dir):
+        manifest = man_filename or "fs_manifest.csv"
+        if not os.path.isfile(os.path.join(dir, manifest)):
+            return
         fs = Filesplit()
         if man_filename is not None:
             fs.man_filename = man_filename
