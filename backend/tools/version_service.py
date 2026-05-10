@@ -199,13 +199,12 @@ class VersionService:
 
         install_dir = VersionService._detect_install_dir()
 
-        cmd = [exe_path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
-        if install_dir:
-            cmd.append(f"/DIR={install_dir}")
+        dir_arg = f' /DIR="{install_dir}"' if install_dir else ""
+        cmd_str = f'"{exe_path}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART{dir_arg}'
 
         try:
-            print(f"[Update] 执行: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, timeout=120)
+            print(f"[Update] 执行: {cmd_str}")
+            result = subprocess.run(cmd_str, capture_output=True, timeout=120)
             if result.returncode == 0:
                 return True, f"更新成功 (v{VERSION} → 新版本)，请重启应用"
             else:
