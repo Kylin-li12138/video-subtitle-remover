@@ -50,11 +50,14 @@ class SubtitleDetect:
         has_hpi_plugin = importlib.util.find_spec("ultra_infer") is not None
         onnx_providers = hardware_accelerator.onnx_providers if has_hpi_plugin else []
         model_config = ModelConfig()
-        if os.path.isdir(model_config.DET_MODEL_DIR):
+        det_dir = model_config.DET_MODEL_DIR
+        if os.path.isdir(det_dir):
             os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+        else:
+            det_dir = None
         return TextDetection(
             model_name=model_config.DET_MODEL_NAME,
-            model_dir=model_config.DET_MODEL_DIR,
+            model_dir=det_dir,
             device="cpu",
             enable_hpi=len(onnx_providers) > 0,
             enable_mkldnn=False,
