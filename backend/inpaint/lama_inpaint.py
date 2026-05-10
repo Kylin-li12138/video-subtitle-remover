@@ -9,6 +9,8 @@ from backend import config
 from backend.tools.inpaint_tools import get_inpaint_area_by_mask
 
 class LamaInpaint:
+    per_frame = True
+
     def __init__(self, device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"), model_path='big-lama.pt') -> None:
         self.model = torch.jit.load(model_path, map_location=device)
         self.model.eval()

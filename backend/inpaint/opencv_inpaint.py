@@ -1,6 +1,7 @@
 import cv2
 
 class OpenCVInpaint:
+    per_frame = True
 
     def __init__(self):
         pass

@@ -21,6 +21,8 @@ _to_tensors = transforms.Compose([
 ])
 
 class STTNDetInpaint:
+    per_frame = False
+
     def __init__(self, device, model_path):
         self.device = device
         # 1. 创建InpaintGenerator模型实例并装载到选择的设备上

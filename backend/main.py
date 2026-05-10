@@ -156,6 +156,44 @@ class SubtitleRemover:
         """
         pass
 
+    # ---- 后处理：时序平滑 + OCR 校验精修 ----
+
+    @staticmethod
+    def _temporal_smooth(frames, mask, window=5):
+        """对 mask 区域做时间维度高斯加权平均，抑制帧间闪烁"""
+        if len(frames) < 3:
+            return frames
+        mask_2d = mask > 0
+        half = window // 2
+        smoothed = []
+        for i in range(len(frames)):
+            s = max(0, i - half)
+            e = min(len(frames), i + half + 1)
+            kernel = cv2.getGaussianKernel(e - s, -1).flatten()
+            kernel /= kernel.sum()
+            blended = np.zeros_like(frames[i], dtype=np.float32)
+            for k, j in enumerate(range(s, e)):
+                blended += frames[j].astype(np.float32) * kernel[k]
+            result = frames[i].copy()
+            result[mask_2d] = np.clip(blended, 0, 255).astype(np.uint8)[mask_2d]
+            smoothed.append(result)
+        return smoothed
+
+    @cached_property
+    def _refine_detector(self):
+        return SubtitleDetect(self.video_path, self.sub_areas)
+
+    def _ocr_refine(self, frame, mask):
+        """检测修复帧中的残留文字，用 LAMA 单帧精修"""
+        areas = self._refine_detector.detect_subtitle(frame)
+        if not areas:
+            return frame
+        refine_mask = create_mask(self.mask_size, areas)
+        refine_mask[mask == 0] = 0
+        if refine_mask.sum() == 0:
+            return frame
+        return self.lama_inpaint.inpaint(frame, refine_mask)
+
     def propainter_mode(self, tbar):
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
@@ -217,6 +255,7 @@ class SubtitleRemover:
                             inner_index += 1
                             single_mask = create_mask(self.mask_size, sub_list[index])
                             inpainted_frame = self.lama_inpaint.inpaint(frame, single_mask)
+                            inpainted_frame = self._ocr_refine(inpainted_frame, single_mask)
                             self.video_writer.write(inpainted_frame)
                             self.update_preview_with_comp(np.clip(frame+single_mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_frame)
                             self.update_progress(tbar, increment=1)
@@ -224,7 +263,9 @@ class SubtitleRemover:
                         else:
                             mask = create_mask(self.mask_size, sub_list[start_frame_no])
                             inpainted_frames = propainter_inpaint(temp_frames, mask)
+                            inpainted_frames = self._temporal_smooth(inpainted_frames, mask)
                             for i, inpainted_frame in enumerate(inpainted_frames):
+                                inpainted_frame = self._ocr_refine(inpainted_frame, mask)
                                 self.video_writer.write(inpainted_frame)
                                 inner_index += 1
                                 self.update_preview_with_comp(np.clip(temp_frames[i]+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_frame)
@@ -292,39 +333,46 @@ class SubtitleRemover:
                                 mask_area_coordinates.append(area)
                 mask = create_mask(self.mask_size, mask_area_coordinates)
 
-                if hasattr(model, 'inpaint'):
-                    # 逐帧模型 (LAMA / OpenCV): 每帧立即处理、写入、预览
-                    inpainted = model.inpaint(frame, mask)
-                    self.video_writer.write(inpainted)
-                    self.update_preview_with_comp(np.clip(frame+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted)
-                    self.update_progress(tbar, increment=1)
+                if getattr(model, 'per_frame', False):
+                    # 逐帧模型 (LAMA / OpenCV): 处理并收集，再平滑+精修后写入
+                    originals = [frame]
+                    inpainted_list = [model.inpaint(frame, mask)]
+                    self.update_preview_with_comp(np.clip(frame+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_list[-1])
                     for j in range(end_frame_index - start_frame_index):
                         ret, frame = reader.read()
                         if not ret:
                             break
                         current_frame_index += 1
-                        inpainted = model.inpaint(frame, mask)
-                        self.video_writer.write(inpainted)
-                        self.update_preview_with_comp(np.clip(frame+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted)
+                        inpainted_list.append(model.inpaint(frame, mask))
+                        originals.append(frame)
+                        self.update_preview_with_comp(np.clip(frame+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_list[-1])
+                    inpainted_list = self._temporal_smooth(inpainted_list, mask)
+                    for i, inpainted_frame in enumerate(inpainted_list):
+                        inpainted_frame = self._ocr_refine(inpainted_frame, mask)
+                        self.video_writer.write(inpainted_frame)
                         self.update_progress(tbar, increment=1)
                 else:
                     # 批量模型 (STTN_DET): 收集帧后批处理
                     frames_need_inpaint = [frame]
-                    inner_index = 0
                     for j in range(end_frame_index - start_frame_index):
                         ret, frame = reader.read()
                         if not ret:
                             break
                         current_frame_index += 1
                         frames_need_inpaint.append(frame)
+                    all_inpainted = []
+                    all_originals = []
                     for batch in batch_generator(frames_need_inpaint, config.getSttnMaxLoadNum()):
                         if len(batch) >= 1:
                             inpainted_frames = model(batch, mask)
-                            for i, inpainted_frame in enumerate(inpainted_frames):
-                                self.video_writer.write(inpainted_frame)
-                                inner_index += 1
-                                self.update_preview_with_comp(np.clip(batch[i]+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_frame)
-                        self.update_progress(tbar, increment=len(batch))
+                            all_inpainted.extend(inpainted_frames)
+                            all_originals.extend(batch)
+                    all_inpainted = self._temporal_smooth(all_inpainted, mask)
+                    for i, inpainted_frame in enumerate(all_inpainted):
+                        inpainted_frame = self._ocr_refine(inpainted_frame, mask)
+                        self.video_writer.write(inpainted_frame)
+                        self.update_preview_with_comp(np.clip(all_originals[i]+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_frame)
+                        self.update_progress(tbar, increment=1)
         reader.stop()
 
     def run(self):
