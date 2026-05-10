@@ -182,13 +182,10 @@ class VersionService:
     @staticmethod
     def apply_update(exe_path: str) -> tuple[bool, str]:
         """
-        静默运行补丁 .exe。
+        以管理员权限静默运行补丁 .exe。
 
-        Inno Setup 参数:
-            /VERYSILENT     无任何弹窗
-            /SUPPRESSMSGBOXES  抑制消息框
-            /NORESTART      不自动重启
-            /DIR=           指定安装目录
+        通过 PowerShell Start-Process -Verb RunAs 触发 UAC 提权，
+        确保补丁能写入 Program Files 等受保护目录。
 
         Returns
         -------
@@ -199,12 +196,21 @@ class VersionService:
 
         install_dir = VersionService._detect_install_dir()
 
-        dir_arg = f' /DIR="{install_dir}"' if install_dir else ""
-        cmd_str = f'"{exe_path}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART{dir_arg}'
+        dir_arg = f' /DIR=""{install_dir}""' if install_dir else ""
+        args = f'/VERYSILENT /SUPPRESSMSGBOXES /NORESTART{dir_arg}'
 
         try:
-            print(f"[Update] 执行: {cmd_str}")
-            result = subprocess.run(cmd_str, capture_output=True, timeout=120)
+            print(f"[Update] 执行 (UAC): {exe_path} {args}")
+            ps_script = (
+                f"$p = Start-Process -FilePath '{exe_path}' "
+                f"-ArgumentList '{args}' "
+                f"-Verb RunAs -Wait -PassThru; "
+                f"exit $p.ExitCode"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_script],
+                capture_output=True, text=True, timeout=120,
+            )
             if result.returncode == 0:
                 return True, f"更新成功 (v{VERSION} → 新版本)，请重启应用"
             else:

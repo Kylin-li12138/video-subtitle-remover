@@ -30,8 +30,6 @@ class ModelConfig:
             self.missing_models.append("STTN")
         if not os.path.isdir(self.PROPAINTER_MODEL_DIR):
             self.missing_models.append("ProPainter")
-        if not os.path.isdir(self.DET_MODEL_DIR):
-            self.missing_models.append("V5 检测模型")
 
         if not self.missing_models:
             merge_big_file_if_not_exists(self.LAMA_MODEL_DIR, 'bit-lama.pt')

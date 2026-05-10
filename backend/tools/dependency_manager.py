@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import sys
+import shutil
 import subprocess
 import importlib.util
 import re
@@ -374,60 +375,85 @@ class ResourceInfo:
     description: str
     check_paths: list = field(default_factory=list)
     installed: bool = False
+    files: list = field(default_factory=list)
 
 
-GITHUB_RELEASE_BASE = (
-    "https://github.com/Kylin-li12138/video-subtitle-remover"
-    "/releases/download/models-v1/"
-)
+_HF_RESOLVE = "https://huggingface.co/{}/resolve/main/{}"
+_GH_RELEASE = "https://github.com/{}/releases/download/{}/{}"
+_PROPAINTER_TAG = "v0.1.0"
 
 RESOURCE_MIRROR_PRESETS = {
-    "ghfast 加速 (推荐)": f"https://ghfast.top/{GITHUB_RELEASE_BASE}",
-    "GitHub 直连": GITHUB_RELEASE_BASE,
+    "hf-mirror 国内镜像 (推荐)": {
+        "hf_mirror": "https://hf-mirror.com",
+        "gh_proxy": "https://ghfast.top/",
+    },
+    "ghfast 全局加速": {
+        "hf_mirror": "",
+        "gh_proxy": "https://ghfast.top/",
+    },
+    "直连 (海外用户)": {
+        "hf_mirror": "",
+        "gh_proxy": "",
+    },
 }
 
-DEFAULT_RESOURCE_MIRROR = "ghfast 加速 (推荐)"
+DEFAULT_RESOURCE_MIRROR = "hf-mirror 国内镜像 (推荐)"
 
 RESOURCE_DOWNLOADS: list[ResourceInfo] = [
     ResourceInfo(
         name="Big-LAMA",
         filename="big-lama.zip",
         target_dir="models",
-        size_mb=200,
+        size_mb=364,
         description="图像修复模型 (LAMA 算法)",
         check_paths=["models/big-lama"],
+        files=[(_HF_RESOLVE.format("smartywu/big-lama", "big-lama.zip"), None)],
     ),
     ResourceInfo(
         name="ProPainter",
-        filename="propainter.zip",
-        target_dir="models",
-        size_mb=200,
+        filename="",
+        target_dir="models/propainter",
+        size_mb=60,
         description="视频修复模型 (ProPainter 算法)",
         check_paths=["models/propainter"],
+        files=[
+            (_GH_RELEASE.format("sczhou/ProPainter", _PROPAINTER_TAG, "ProPainter.pth"), "ProPainter.pth"),
+            (_GH_RELEASE.format("sczhou/ProPainter", _PROPAINTER_TAG, "raft-things.pth"), "raft-things.pth"),
+            (_GH_RELEASE.format("sczhou/ProPainter", _PROPAINTER_TAG, "recurrent_flow_completion.pth"), "recurrent_flow_completion.pth"),
+        ],
     ),
     ResourceInfo(
         name="STTN",
-        filename="sttn.zip",
+        filename="",
         target_dir="models",
-        size_mb=200,
+        size_mb=63,
         description="视频字幕擦除模型 (STTN 算法)",
-        check_paths=["models/sttn-auto", "models/sttn-det"],
+        check_paths=["models/sttn-auto"],
+        files=[
+            (_HF_RESOLVE.format(
+                "spaces/paulpang/video-subtitle-remover",
+                "backend/models/sttn/infer_model.pth"), "sttn-auto/infer_model.pth"),
+        ],
     ),
     ResourceInfo(
         name="V5 检测模型",
-        filename="v5-det.zip",
-        target_dir="models",
-        size_mb=350,
-        description="PP-OCRv5 文字检测模型",
-        check_paths=["models/V5"],
+        filename="",
+        target_dir="models/V5",
+        size_mb=50,
+        description="PP-OCRv5 文字检测模型 (首次使用时自动下载)",
+        check_paths=[],
+        files=[],
     ),
     ResourceInfo(
         name="FFmpeg",
-        filename="ffmpeg-win64.zip",
+        filename="ffmpeg-master-latest-win64-gpl.zip",
         target_dir="",
-        size_mb=364,
+        size_mb=210,
         description="音视频处理工具",
         check_paths=["ffmpeg"],
+        files=[(_GH_RELEASE.format(
+            "BtbN/FFmpeg-Builds", "latest",
+            "ffmpeg-master-latest-win64-gpl.zip"), None)],
     ),
 ]
 
@@ -443,10 +469,14 @@ def check_resources(base_dir: str) -> list[ResourceInfo]:
             size_mb=res.size_mb,
             description=res.description,
             check_paths=list(res.check_paths),
+            files=list(res.files),
         )
-        info.installed = all(
-            os.path.isdir(os.path.join(base_dir, p)) for p in res.check_paths
-        )
+        if res.check_paths:
+            info.installed = all(
+                os.path.isdir(os.path.join(base_dir, p)) for p in res.check_paths
+            )
+        else:
+            info.installed = True
         results.append(info)
     return results
 
@@ -465,17 +495,26 @@ class ResourceDownloader(QThread):
         super().__init__(parent)
         self._resources: list[ResourceInfo] = []
         self._base_dir: str = ""
-        self._mirror_base: str = ""
+        self._gh_proxy: str = ""
         self._cancelled: bool = False
 
     def setup(self, resources: list[ResourceInfo], base_dir: str,
               mirror_name: str = DEFAULT_RESOURCE_MIRROR):
         self._resources = resources
         self._base_dir = base_dir
-        self._mirror_base = RESOURCE_MIRROR_PRESETS.get(
+        mirror_cfg = RESOURCE_MIRROR_PRESETS.get(
             mirror_name, list(RESOURCE_MIRROR_PRESETS.values())[0]
         )
+        self._hf_mirror: str = mirror_cfg.get("hf_mirror", "")
+        self._gh_proxy: str = mirror_cfg.get("gh_proxy", "")
         self._cancelled = False
+
+    def _apply_proxy(self, url: str) -> str:
+        if self._hf_mirror and "huggingface.co" in url:
+            return url.replace("https://huggingface.co", self._hf_mirror)
+        if self._gh_proxy and "github.com" in url:
+            return self._gh_proxy + url
+        return url
 
     # -- QThread entry point --------------------------------------------------
 
@@ -495,19 +534,19 @@ class ResourceDownloader(QThread):
             self.output_signal.emit(
                 f"[{idx + 1}/{total}] 正在下载: {res.name}  (~{res.size_mb} MB)"
             )
-
-            url = self._mirror_base + res.filename
-            self.output_signal.emit(f"URL: {url}")
             self.output_signal.emit(f"{'=' * 50}\n")
 
             try:
-                tmp_path = self._download_file(url, idx, total)
+                if not res.files:
+                    self.output_signal.emit(f"  [信息] {res.name} 首次使用时由 PaddleOCR 自动下载，无需手动操作")
+                elif any(u.endswith(".zip") for u, _ in res.files if u):
+                    self._download_zip_resource(res, idx, total)
+                else:
+                    self._download_file_resource(res, idx, total)
+
                 if self._cancelled:
-                    self._cleanup(tmp_path)
                     break
-                self._extract_zip(tmp_path, res)
-                self._cleanup(tmp_path)
-                self.output_signal.emit(f"[完成] {res.name} 下载并解压成功\n")
+                self.output_signal.emit(f"[完成] {res.name} 下载成功\n")
             except Exception as exc:
                 has_error = True
                 self.output_signal.emit(f"\n[错误] {res.name} 下载失败: {exc}")
@@ -522,15 +561,45 @@ class ResourceDownloader(QThread):
         else:
             self.finished_signal.emit(True, "所有资源下载完成")
 
+    def _download_zip_resource(self, res: ResourceInfo, idx: int, total: int):
+        url, _ = res.files[0]
+        url = self._apply_proxy(url)
+        self.output_signal.emit(f"  URL: {url}")
+        tmp_path = self._download_file(url, idx, total)
+        if self._cancelled:
+            self._cleanup(tmp_path)
+            return
+        self._extract_zip(tmp_path, res)
+        self._cleanup(tmp_path)
+
+    def _download_file_resource(self, res: ResourceInfo, idx: int, total: int):
+        dest_base = os.path.join(self._base_dir, res.target_dir) if res.target_dir else self._base_dir
+        os.makedirs(dest_base, exist_ok=True)
+        for fi, (url, rel_path) in enumerate(res.files):
+            if self._cancelled:
+                return
+            url = self._apply_proxy(url)
+            fname = rel_path or url.rsplit("/", 1)[-1]
+            self.output_signal.emit(f"  [{fi+1}/{len(res.files)}] {fname}")
+            dest = os.path.join(dest_base, fname)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            tmp_path = self._download_file(url, idx, total)
+            if self._cancelled:
+                self._cleanup(tmp_path)
+                return
+            shutil.move(tmp_path, dest)
+            self.output_signal.emit(f"        -> {dest}")
+
     # -- internal helpers -----------------------------------------------------
 
     def _download_file(self, url: str, res_idx: int, total: int) -> str:
         """下载单个文件到临时路径，返回临时文件路径"""
         req = Request(url, headers={"User-Agent": "VSR-Downloader/1.0"})
-        resp = urlopen(req, timeout=30)
+        resp = urlopen(req, timeout=60)
         content_length = int(resp.headers.get("Content-Length", 0))
 
-        fd, tmp_path = tempfile.mkstemp(suffix=".zip")
+        suffix = ".zip" if url.endswith(".zip") else ".tmp"
+        fd, tmp_path = tempfile.mkstemp(suffix=suffix)
         try:
             downloaded = 0
             last_pct = -1
@@ -563,13 +632,26 @@ class ResourceDownloader(QThread):
         return tmp_path
 
     def _extract_zip(self, zip_path: str, res: ResourceInfo):
-        """解压 zip 到目标目录"""
+        """解压 zip 到目标目录，自动处理嵌套顶层目录"""
         extract_to = os.path.join(self._base_dir, res.target_dir) if res.target_dir else self._base_dir
         os.makedirs(extract_to, exist_ok=True)
 
         self.output_signal.emit(f"  正在解压到 {extract_to} ...")
         with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(extract_to)
+            names = zf.namelist()
+            top_dirs = {n.split("/")[0] for n in names if "/" in n}
+
+            if res.name == "FFmpeg" and len(top_dirs) == 1:
+                tmp_extract = os.path.join(self._base_dir, "__ffmpeg_tmp__")
+                zf.extractall(tmp_extract)
+                nested = os.path.join(tmp_extract, top_dirs.pop())
+                dest = os.path.join(self._base_dir, "ffmpeg")
+                if os.path.exists(dest):
+                    shutil.rmtree(dest)
+                shutil.move(nested, dest)
+                shutil.rmtree(tmp_extract, ignore_errors=True)
+            else:
+                zf.extractall(extract_to)
         self.output_signal.emit("  解压完成")
 
     @staticmethod
