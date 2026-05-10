@@ -98,6 +98,29 @@ def _read_version() -> str:
     raise RuntimeError("无法从 backend/config.py 读取 VERSION")
 
 
+def _write_version(version: str):
+    """将版本号写入 backend/config.py"""
+    import re
+    config_py = PROJ_ROOT / "backend" / "config.py"
+    content = config_py.read_text(encoding="utf-8")
+    new_content = re.sub(
+        r'^(VERSION\s*=\s*)["\'].*?["\']',
+        f'\\1"{version}"',
+        content,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    config_py.write_text(new_content, encoding="utf-8")
+    print(f"[版本] backend/config.py VERSION 已更新为 {version}")
+
+
+def _bump_patch(version: str) -> str:
+    """1.0.5 -> 1.0.6"""
+    parts = version.split(".")
+    parts[-1] = str(int(parts[-1]) + 1)
+    return ".".join(parts)
+
+
 def get_changed_files(from_ref: str, to_ref: str = "HEAD") -> list[str]:
     diff_output = _git("diff", "--name-only", "--diff-filter=ACMR", from_ref, to_ref)
     if not diff_output:
@@ -144,9 +167,21 @@ def _generate_iss(version: str, patch_files_dir: Path, file_list: list[str],
 # ------------------------------------------------------------------
 
 def build_patch(from_ref: str, to_ref: str = "HEAD",
-                output_dir: str = None, build_exe: bool = True):
-    to_version = _read_version()
+                output_dir: str = None, build_exe: bool = True,
+                target_version: str = None):
     from_version = from_ref.lstrip("v")
+    cur_version = _read_version()
+
+    if target_version:
+        to_version = target_version
+    elif cur_version == from_version:
+        to_version = _bump_patch(from_version)
+        print(f"[版本] config.py 版本与基准相同，自动递增: {from_version} → {to_version}")
+    else:
+        to_version = cur_version
+
+    if to_version != cur_version:
+        _write_version(to_version)
 
     changed = get_changed_files(from_ref, to_ref)
     if "backend/config.py" not in changed:
@@ -252,6 +287,8 @@ def main():
                         help="起始版本 tag 或 commit，如 v1.3.0")
     parser.add_argument("--to", dest="to_ref", default="HEAD",
                         help="目标版本 tag 或 commit，默认 HEAD")
+    parser.add_argument("--version", dest="target_version", default=None,
+                        help="补丁目标版本号，如 1.1.0 (自动写入 config.py)")
     parser.add_argument("--output", dest="output_dir", default=None,
                         help="输出目录，默认 dist/patches/")
     parser.add_argument("--no-exe", dest="no_exe", action="store_true",
@@ -259,7 +296,8 @@ def main():
     args = parser.parse_args()
 
     build_patch(args.from_ref, args.to_ref, args.output_dir,
-                build_exe=not args.no_exe)
+                build_exe=not args.no_exe,
+                target_version=args.target_version)
 
 
 if __name__ == "__main__":
