@@ -26,6 +26,7 @@ from backend.tools.theme_listener import SystemThemeListener
 from backend.tools.process_manager import ProcessManager
 from ui.advanced_setting_interface import AdvancedSettingInterface
 from ui.home_interface import HomeInterface
+from ui.dependency_interface import DependencyInterface
 
 
 class SubtitleExtractorGUI(FluentWindow): 
@@ -48,6 +49,7 @@ class SubtitleExtractorGUI(FluentWindow):
         self._create_layout()
         self._connectSignalToSlot()
         self._lazy_check_update()
+        self._lazy_check_deps()
 
     def _lazy_check_update(self):
         """ 延迟检查更新 """
@@ -57,6 +59,24 @@ class SubtitleExtractorGUI(FluentWindow):
         self.check_update_timer.setSingleShot(True)
         self.check_update_timer.timeout.connect(lambda: self.advancedSettingInterface.check_update(ignore=True))
         self.check_update_timer.start(2000)
+
+    def _lazy_check_deps(self):
+        """延迟检查依赖状态，缺失时提示用户"""
+        self._dep_check_timer = QtCore.QTimer(self)
+        self._dep_check_timer.setSingleShot(True)
+        self._dep_check_timer.timeout.connect(self._notify_missing_deps)
+        self._dep_check_timer.start(3000)
+
+    def _notify_missing_deps(self):
+        """检测到缺失依赖时弹出提示"""
+        if self.dependencyInterface.has_missing_deps():
+            try:
+                title = tr['DependencyInterface']['MissingDepTitle']
+                hint = tr['DependencyInterface']['MissingDepHint']
+            except (KeyError, TypeError):
+                title = '缺少依赖'
+                hint = '部分 AI 依赖未安装，请前往「依赖安装」页面安装'
+            InfoBar.warning(title, hint, duration=8000, parent=self)
 
     def _connectSignalToSlot(self):
         config.appRestartSig.connect(self._showRestartTooltip)
@@ -74,11 +94,15 @@ class SubtitleExtractorGUI(FluentWindow):
         # 创建主页面和高级设置页面
         self.homeInterface = HomeInterface(self)
         self.homeInterface.setObjectName("HomeInterface")
+        self.dependencyInterface = DependencyInterface(self)
+        self.dependencyInterface.setObjectName("DependencyInterface")
         self.advancedSettingInterface = AdvancedSettingInterface(self)
         self.advancedSettingInterface.setObjectName("AdvancedSettingInterface")
         
         # 添加到主窗口作为子界面
-        self.addSubInterface(self.homeInterface,FluentIcon.HOME, tr['SubtitleExtractorGUI']['Title'])
+        self.addSubInterface(self.homeInterface, FluentIcon.HOME, tr['SubtitleExtractorGUI']['Title'])
+        dep_title = tr['DependencyInterface']['Title'] if tr.has_section('DependencyInterface') else '依赖安装'
+        self.addSubInterface(self.dependencyInterface, FluentIcon.DOWNLOAD, dep_title)
         self.addSubInterface(self.advancedSettingInterface, FluentIcon.SETTING, tr['Setting']['AdvancedSetting'], NavigationItemPosition.BOTTOM)
 
     def on_navigation_item_changed(self, key):

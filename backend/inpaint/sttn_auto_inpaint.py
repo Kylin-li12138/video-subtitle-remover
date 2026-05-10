@@ -1,347 +1,509 @@
 import os
-import time
+import queue
 import sys
-import gc
+import threading
+import time
 from typing import List
 
 import cv2
-import torch
 import numpy as np
-from tqdm import tqdm
+import torch
 from torchvision import transforms
+from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 from backend.config import config
 from backend.inpaint.sttn.auto_sttn import InpaintGenerator
 from backend.inpaint.utils.sttn_utils import Stack, ToTorchFormatTensor
-from backend.tools.inpaint_tools import get_inpaint_area_by_mask, is_frame_number_in_ab_sections
-from backend.tools.video_io import FramePrefetcher
 from backend.tools.hardware_accelerator import HardwareAccelerator
+from backend.tools.inpaint_tools import get_inpaint_area_by_mask, is_frame_number_in_ab_sections
+from backend.tools.video_io import AsyncVideoWriter, FramePrefetcher
 
-# 定义图像预处理方式
+
 _to_tensors = transforms.Compose([
-    Stack(),  # 将图像堆叠为序列
-    ToTorchFormatTensor()  # 将堆叠的图像转化为PyTorch张量
+    Stack(),
+    ToTorchFormatTensor(),
 ])
+
+
+def _prepare_model_tensor(frames: List[np.ndarray], pin_memory=False):
+    if not frames:
+        return None
+
+    tensor = _to_tensors(frames).unsqueeze(0) * 2 - 1
+    if pin_memory and torch.cuda.is_available():
+        try:
+            tensor = tensor.pin_memory()
+        except RuntimeError:
+            pass
+    return tensor
+
+
+class ChunkPrefetcher:
+    """CPU stage: read, crop, resize, and tensorize chunks ahead of GPU inference."""
+
+    def __init__(
+        self,
+        frame_prefetcher,
+        frame_info,
+        inpaint_area,
+        ab_sections,
+        model_input_width,
+        model_input_height,
+        chunk_size,
+        total_chunks,
+        pin_memory=False,
+        queue_size=2,
+    ):
+        self.frame_prefetcher = frame_prefetcher
+        self.frame_info = frame_info
+        self.inpaint_area = inpaint_area
+        self.ab_sections = ab_sections
+        self.model_input_width = model_input_width
+        self.model_input_height = model_input_height
+        self.chunk_size = chunk_size
+        self.total_chunks = total_chunks
+        self.pin_memory = pin_memory
+        self._queue = queue.Queue(maxsize=queue_size)
+        self._stopped = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        try:
+            for i in range(self.total_chunks):
+                if self._stopped:
+                    break
+                start_f = i * self.chunk_size
+                end_f = min((i + 1) * self.chunk_size, self.frame_info["len"])
+                self._put(("chunk", self._read_and_prepare_chunk(start_f, end_f)))
+            self._put(("done", None))
+        except Exception as exc:
+            self._put(("error", exc))
+
+    def _read_and_prepare_chunk(self, start_f, end_f):
+        frames_hr = []
+        frames = {k: [] for k in range(len(self.inpaint_area))}
+        processed_frames_map = {}
+        processed_idx = 0
+        valid_frames_count = 0
+
+        for j in range(start_f, end_f):
+            success, image = self.frame_prefetcher.read()
+            if not success:
+                print(f"Warning: Failed to read frame {j}.")
+                break
+
+            frames_hr.append(image)
+            valid_frames_count += 1
+
+            if is_frame_number_in_ab_sections(j, self.ab_sections):
+                processed_frames_map[j - start_f] = processed_idx
+                processed_idx += 1
+                for k, area in enumerate(self.inpaint_area):
+                    image_crop = image[area[0]:area[1], :, :]
+                    frames[k].append(
+                        cv2.resize(
+                            image_crop,
+                            (self.model_input_width, self.model_input_height),
+                        )
+                    )
+
+        return {
+            "start_f": start_f,
+            "end_f": end_f,
+            "frames_hr": frames_hr,
+            "frame_tensors": {
+                k: _prepare_model_tensor(frames[k], self.pin_memory)
+                for k in range(len(self.inpaint_area))
+            },
+            "processed_frames_map": processed_frames_map,
+            "valid_frames_count": valid_frames_count,
+        }
+
+    def _put(self, item):
+        while not self._stopped:
+            try:
+                self._queue.put(item, timeout=0.2)
+                return
+            except queue.Full:
+                continue
+
+    def read(self):
+        item_type, payload = self._queue.get()
+        if item_type == "error":
+            raise payload
+        if item_type == "done":
+            return None
+        return payload
+
+    def stop(self):
+        self._stopped = True
+        try:
+            self._thread.join(timeout=5)
+        except Exception:
+            pass
+
+
+class GpuChunkProcessor:
+    """GPU stage: run STTN while CPU prepares and composes other chunks."""
+
+    def __init__(self, sttn_inpaint, chunk_source, inpaint_area, queue_size=2):
+        self.sttn_inpaint = sttn_inpaint
+        self.chunk_source = chunk_source
+        self.inpaint_area = inpaint_area
+        self._queue = queue.Queue(maxsize=queue_size)
+        self._stopped = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        try:
+            while not self._stopped:
+                chunk = self.chunk_source.read()
+                if chunk is None:
+                    self._put(("done", None))
+                    return
+
+                frame_tensors = chunk.pop("frame_tensors", {})
+                comps = {}
+                for k in range(len(self.inpaint_area)):
+                    tensor = frame_tensors.get(k)
+                    comps[k] = self.sttn_inpaint.inpaint_tensor(tensor) if tensor is not None else []
+                chunk["comps"] = comps
+                self._put(("chunk", chunk))
+        except Exception as exc:
+            self._put(("error", exc))
+
+    def _put(self, item):
+        while not self._stopped:
+            try:
+                self._queue.put(item, timeout=0.2)
+                return
+            except queue.Full:
+                continue
+
+    def read(self):
+        item_type, payload = self._queue.get()
+        if item_type == "error":
+            raise payload
+        if item_type == "done":
+            return None
+        return payload
+
+    def stop(self):
+        self._stopped = True
+        try:
+            self._thread.join(timeout=5)
+        except Exception:
+            pass
+
 
 class STTNInpaint:
     def __init__(self, device, model_path):
         self.device = device
-        # 1. 创建InpaintGenerator模型实例并装载到选择的设备上
+        self.use_amp = getattr(self.device, "type", str(self.device)) == "cuda"
+        if self.use_amp:
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            try:
+                torch.set_float32_matmul_precision("high")
+            except Exception:
+                pass
+
         self.model = InpaintGenerator().to(self.device)
-        # 2. 载入预训练模型的权重，转载模型的状态字典
-        self.model.load_state_dict(torch.load(model_path, map_location='cpu')['netG'])
-        # 3. # 将模型设置为评估模式
+        self.model.load_state_dict(torch.load(model_path, map_location="cpu")["netG"])
         self.model.eval()
-        # 模型输入用的宽和高
         self.model_input_width, self.model_input_height = 640, 120
-        # 2. 设置相连帧数
         self.neighbor_stride = config.sttnNeighborStride.value
         self.ref_length = config.sttnReferenceLength.value
 
     def __call__(self, input_frames: List[np.ndarray], input_mask: np.ndarray):
-        """
-        :param input_frames: 原视频帧
-        :param mask: 字幕区域mask
-        """
         _, mask = cv2.threshold(input_mask, 127, 1, cv2.THRESH_BINARY)
         mask = mask[:, :, None]
-        H_ori, W_ori = mask.shape[:2]
-        H_ori = int(H_ori + 0.5)
-        W_ori = int(W_ori + 0.5)
-        # 确定去字幕的垂直高度部分
-        split_h = int(W_ori * 3 / 16)
-        inpaint_area = get_inpaint_area_by_mask(W_ori, H_ori, split_h, mask)
-        # 初始化帧存储变量
-        # 高分辨率帧存储列表（浅拷贝 + 逐帧 copy，避免 deepcopy 开销）
-        frames_hr = [f.copy() for f in input_frames]
-        frames_scaled = {}  # 存放缩放后帧的字典
-        comps = {}  # 存放补全后帧的字典
-        # 存储最终的视频帧
+        h_ori, w_ori = mask.shape[:2]
+        split_h = int(w_ori * 3 / 16)
+        inpaint_area = get_inpaint_area_by_mask(w_ori, h_ori, split_h, mask)
+
+        frames_hr = [frame.copy() for frame in input_frames]
+        frames_scaled = {k: [] for k in range(len(inpaint_area))}
+        for image in frames_hr:
+            for k, area in enumerate(inpaint_area):
+                image_crop = image[area[0]:area[1], :, :]
+                frames_scaled[k].append(
+                    cv2.resize(image_crop, (self.model_input_width, self.model_input_height))
+                )
+
+        comps = {k: self.inpaint(frames_scaled[k]) for k in range(len(inpaint_area))}
+        if not inpaint_area:
+            return frames_hr
+
         inpainted_frames = []
-        for k in range(len(inpaint_area)):
-            frames_scaled[k] = []  # 为每个去除部分初始化一个列表
-
-        # 读取并缩放帧
-        for j in range(len(frames_hr)):
-            image = frames_hr[j]
-            # 对每个去除部分进行切割和缩放
-            for k in range(len(inpaint_area)):
-                image_crop = image[inpaint_area[k][0]:inpaint_area[k][1], :, :]  # 切割
-                image_resize = cv2.resize(image_crop, (self.model_input_width, self.model_input_height))  # 缩放
-                frames_scaled[k].append(image_resize)  # 将缩放后的帧添加到对应列表
-
-        # 处理每一个去除部分
-        for k in range(len(inpaint_area)):
-            # 调用inpaint函数进行处理
-            comps[k] = self.inpaint(frames_scaled[k])
-
-        # 如果存在去除部分
-        if inpaint_area:
-            for j in range(len(frames_hr)):
-                frame = frames_hr[j]  # 取出原始帧
-                # 对于模式中的每一个段落
-                for k in range(len(inpaint_area)):
-                    comp = cv2.resize(comps[k][j], (W_ori, split_h))  # 将补全帧缩放回原大小
-                    comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_BGR2RGB)  # 转换颜色空间
-                    # 获取遮罩区域并进行图像合成
-                    mask_area = mask[inpaint_area[k][0]:inpaint_area[k][1], :]  # 取出遮罩区域
-                    # 实现遮罩区域内的图像融合
-                    frame[inpaint_area[k][0]:inpaint_area[k][1], :, :] = mask_area * comp + (1 - mask_area) * frame[inpaint_area[k][0]:inpaint_area[k][1], :, :]
-                # 将最终帧添加到列表
-                inpainted_frames.append(frame)
-                # print(f'processing frame, {len(frames_hr) - j} left')
-        else:
-            inpainted_frames = frames_hr
+        for j, frame in enumerate(frames_hr):
+            for k, area in enumerate(inpaint_area):
+                comp = cv2.resize(comps[k][j], (w_ori, split_h))
+                comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_BGR2RGB)
+                mask_area = mask[area[0]:area[1], :]
+                frame[area[0]:area[1], :, :] = (
+                    mask_area * comp + (1 - mask_area) * frame[area[0]:area[1], :, :]
+                )
+            inpainted_frames.append(frame)
         return inpainted_frames
 
     @staticmethod
     def read_mask(path):
         img = cv2.imread(path, 0)
-        # 转为binary mask
-        ret, img = cv2.threshold(img, 127, 1, cv2.THRESH_BINARY)
-        img = img[:, :, None]
-        return img
+        _, img = cv2.threshold(img, 127, 1, cv2.THRESH_BINARY)
+        return img[:, :, None]
 
     def get_ref_index(self, neighbor_ids, length):
-        """
-        采样整个视频的参考帧
-        """
-        # 初始化参考帧的索引列表
-        ref_index = []
-        # 在视频长度范围内根据ref_length逐步迭代
-        for i in range(0, length, self.ref_length):
-            # 如果当前帧不在近邻帧中
-            if i not in neighbor_ids:
-                # 将它添加到参考帧列表
-                ref_index.append(i)
-        # 返回参考帧索引列表
-        return ref_index
+        return [
+            i for i in range(0, length, self.ref_length)
+            if i not in neighbor_ids
+        ]
 
     def inpaint(self, frames: List[np.ndarray]):
-        """
-        使用STTN完成空洞填充（空洞即被遮罩的区域）
-        """
-        frame_length = len(frames)
-        # 对帧进行预处理转换为张量，并进行归一化
-        feats = _to_tensors(frames).unsqueeze(0) * 2 - 1
-        # 把特征张量转移到指定的设备（CPU或GPU）
-        feats = feats.to(self.device)
-        # 初始化一个与视频长度相同的列表，用于存储处理完成的帧
+        return self.inpaint_tensor(_prepare_model_tensor(frames))
+
+    def inpaint_tensor(self, feats):
+        if feats is None:
+            return []
+
+        frame_length = int(feats.shape[1])
+        feats = feats.to(self.device, non_blocking=self.use_amp)
         comp_frames = [None] * frame_length
-        # 统一关闭梯度计算，用于推理阶段节省内存并加速
-        with torch.no_grad():
-            # 将处理好的帧通过编码器，产生特征表示
-            feats = self.model.encoder(feats.view(frame_length, 3, self.model_input_height, self.model_input_width))
-            # 获取特征维度信息
+
+        with torch.inference_mode(), torch.amp.autocast(
+            "cuda", dtype=torch.float16, enabled=self.use_amp
+        ):
+            feats = self.model.encoder(
+                feats.view(frame_length, 3, self.model_input_height, self.model_input_width)
+            )
             _, c, feat_h, feat_w = feats.size()
-            # 调整特征形状以匹配模型的期望输入
             feats = feats.view(1, frame_length, c, feat_h, feat_w)
-            # 在设定的邻居帧步幅内循环处理视频
+
             for f in range(0, frame_length, self.neighbor_stride):
-                # 计算邻近帧的ID
-                neighbor_ids = [i for i in range(max(0, f - self.neighbor_stride), min(frame_length, f + self.neighbor_stride + 1))]
-                # 获取参考帧的索引
+                neighbor_ids = [
+                    i for i in range(
+                        max(0, f - self.neighbor_stride),
+                        min(frame_length, f + self.neighbor_stride + 1),
+                    )
+                ]
                 ref_ids = self.get_ref_index(neighbor_ids, frame_length)
-                # 通过模型推断特征并传递给解码器以生成完成的帧
                 pred_feat = self.model.infer(feats[0, neighbor_ids + ref_ids, :, :, :])
-                # 将预测的特征通过解码器生成图片，并应用激活函数tanh
                 pred_img = torch.tanh(self.model.decoder(pred_feat[:len(neighbor_ids), :, :, :]))
-                # 将结果张量重新缩放到0到255的范围内
                 pred_img = (pred_img + 1) / 2
-                # 将张量移动回CPU并转为NumPy数组
-                pred_img = pred_img.cpu().permute(0, 2, 3, 1).numpy() * 255
-                # 遍历邻近帧
-                for i in range(len(neighbor_ids)):
-                    idx = neighbor_ids[i]
+                pred_img = pred_img.float().cpu().permute(0, 2, 3, 1).numpy() * 255
+
+                for i, idx in enumerate(neighbor_ids):
                     img = pred_img[i].astype(np.uint8)
                     if comp_frames[idx] is None:
                         comp_frames[idx] = img
                     else:
-                        comp_frames[idx] = comp_frames[idx].astype(np.float32) * 0.5 + img.astype(np.float32) * 0.5
-        # 返回处理完成的帧序列
+                        comp_frames[idx] = (
+                            comp_frames[idx].astype(np.float32) * 0.5
+                            + img.astype(np.float32) * 0.5
+                        )
         return comp_frames
 
 
 class STTNAutoInpaint:
-
-    def read_frame_info_from_video(self):
-        # 使用opencv读取视频
-        reader = cv2.VideoCapture(self.video_path)
-        # 获取视频的宽度, 高度, 帧率和帧数信息并存储在frame_info字典中
-        frame_info = {
-            'W_ori': int(reader.get(cv2.CAP_PROP_FRAME_WIDTH) + 0.5),  # 视频的原始宽度
-            'H_ori': int(reader.get(cv2.CAP_PROP_FRAME_HEIGHT) + 0.5),  # 视频的原始高度
-            'fps': reader.get(cv2.CAP_PROP_FPS),  # 视频的帧率
-            'len': int(reader.get(cv2.CAP_PROP_FRAME_COUNT) + 0.5)  # 视频的总帧数
-        }
-        # 返回视频读取对象、帧信息和视频写入对象
-        return reader, frame_info
-
     def __init__(self, device, model_path, video_path, mask_path=None, clip_gap=None):
-        # STTNInpaint视频修复实例初始化
         self.sttn_inpaint = STTNInpaint(device, model_path)
-        # 视频和掩码路径
         self.video_path = video_path
         self.mask_path = mask_path
-        # 设置输出视频文件的路径
         self.video_out_path = os.path.join(
             os.path.dirname(os.path.abspath(self.video_path)),
-            f"{os.path.basename(self.video_path).rsplit('.', 1)[0]}_no_sub.mp4"
+            f"{os.path.basename(self.video_path).rsplit('.', 1)[0]}_no_sub.mp4",
         )
-        # 配置可在一次处理中加载的最大帧数
-        if clip_gap is None:
-            self.clip_gap = config.getSttnMaxLoadNum()
-        else:
-            self.clip_gap = clip_gap
+        self.clip_gap = config.getSttnMaxLoadNum() if clip_gap is None else clip_gap
+
+    def read_frame_info_from_video(self):
+        reader = cv2.VideoCapture(self.video_path)
+        frame_info = {
+            "W_ori": int(reader.get(cv2.CAP_PROP_FRAME_WIDTH) + 0.5),
+            "H_ori": int(reader.get(cv2.CAP_PROP_FRAME_HEIGHT) + 0.5),
+            "fps": reader.get(cv2.CAP_PROP_FPS),
+            "len": int(reader.get(cv2.CAP_PROP_FRAME_COUNT) + 0.5),
+        }
+        return reader, frame_info
+
+    def _compose_and_write_chunk(
+        self,
+        chunk,
+        frame_info,
+        mask,
+        split_h,
+        inpaint_area,
+        input_sub_remover,
+        tbar,
+        writer,
+    ):
+        frames_hr = chunk["frames_hr"]
+        processed_frames_map = chunk["processed_frames_map"]
+        comps = chunk["comps"]
+
+        for j in range(chunk["valid_frames_count"]):
+            original_frame = (
+                frames_hr[j].copy()
+                if input_sub_remover is not None and input_sub_remover.gui_mode
+                else None
+            )
+            frame = frames_hr[j]
+
+            if j in processed_frames_map:
+                comp_idx = processed_frames_map[j]
+                for k, area in enumerate(inpaint_area):
+                    if comp_idx < len(comps[k]):
+                        comp = cv2.resize(comps[k][comp_idx], (frame_info["W_ori"], split_h))
+                        comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_BGR2RGB)
+                        mask_area = mask[area[0]:area[1], :]
+                        frame[area[0]:area[1], :, :] = (
+                            mask_area * comp + (1 - mask_area) * frame[area[0]:area[1], :, :]
+                        )
+
+            writer.write(frame)
+
+            if input_sub_remover is not None:
+                if tbar is not None:
+                    input_sub_remover.update_progress(tbar, increment=1)
+                if original_frame is not None and input_sub_remover.gui_mode:
+                    input_sub_remover.update_preview_with_comp(original_frame, frame)
 
     def __call__(self, input_mask=None, input_sub_remover=None, tbar=None):
         reader = None
         writer = None
+        frame_prefetcher = None
+        chunk_prefetcher = None
+        gpu_processor = None
+
         try:
-            # 读取视频帧信息
             reader, frame_info = self.read_frame_info_from_video()
-            # 使用帧预读取，I/O 与推理重叠
-            prefetcher = FramePrefetcher(reader)
             if input_sub_remover is not None:
                 ab_sections = input_sub_remover.ab_sections
-                
                 writer = input_sub_remover.video_writer
             else:
                 ab_sections = None
-                # 创建视频写入对象，用于输出修复后的视频
-                writer = cv2.VideoWriter(self.video_out_path, cv2.VideoWriter_fourcc(*"mp4v"), frame_info['fps'], (frame_info['W_ori'], frame_info['H_ori']))
-            
-            # 计算分割高度，用于确定修复区域的大小
-            split_h = int(frame_info['W_ori'] * 3 / 16)
+                writer = cv2.VideoWriter(
+                    self.video_out_path,
+                    cv2.VideoWriter_fourcc(*"mp4v"),
+                    frame_info["fps"],
+                    (frame_info["W_ori"], frame_info["H_ori"]),
+                )
+            writer = AsyncVideoWriter(writer, maxsize=48)
 
+            split_h = int(frame_info["W_ori"] * 3 / 16)
             if input_mask is None:
-                # 读取掩码
                 mask = self.sttn_inpaint.read_mask(self.mask_path)
             else:
                 _, mask = cv2.threshold(input_mask, 127, 1, cv2.THRESH_BINARY)
                 mask = mask[:, :, None]
 
-            # 得到修复区域位置
-            inpaint_area = get_inpaint_area_by_mask(frame_info['W_ori'], frame_info['H_ori'], split_h, mask)
-            # 根据可用显存动态调整 clip_gap，避免 OOM
+            inpaint_area = get_inpaint_area_by_mask(
+                frame_info["W_ori"], frame_info["H_ori"], split_h, mask
+            )
+
             effective_clip_gap = self.clip_gap
             vram_mb = HardwareAccelerator.instance().get_available_vram_mb()
             if vram_mb > 0:
-                # 估算每帧约需 (W * H * 3 * 4) bytes，clip_gap帧约需 clip_gap * W * H * 12 bytes（含中间张量）
-                bytes_per_frame = frame_info['W_ori'] * frame_info['H_ori'] * 12
+                bytes_per_frame = frame_info["W_ori"] * frame_info["H_ori"] * 12
                 max_frames_by_vram = int(vram_mb * 1024 * 1024 / bytes_per_frame)
-                max_frames_by_vram = max(max_frames_by_vram, 10)  # 至少10帧
+                max_frames_by_vram = max(max_frames_by_vram, 10)
                 effective_clip_gap = min(self.clip_gap, max_frames_by_vram)
                 if effective_clip_gap < self.clip_gap:
-                    tqdm.write(f'GPU VRAM: {vram_mb:.0f}MB, adjusting clip_gap: {self.clip_gap} -> {effective_clip_gap}')
-            # 计算需要迭代修复视频的次数
-            rec_time = frame_info['len'] // effective_clip_gap if frame_info['len'] % effective_clip_gap == 0 else frame_info['len'] // effective_clip_gap + 1
-            # 遍历每一次的迭代次数
-            for i in range(rec_time):
-                start_f = i * effective_clip_gap  # 起始帧位置
-                end_f = min((i + 1) * effective_clip_gap, frame_info['len'])  # 结束帧位置
-                tqdm.write(f'Processing: {start_f + 1} - {end_f} / Total: {frame_info['len']}')
-                
-                frames_hr = []  # 高分辨率帧列表
-                frames = {}  # 帧字典，用于存储裁剪后的图像
-                comps = {}  # 组合字典，用于存储修复后的图像
-                
-                # 初始化帧字典
-                for k in range(len(inpaint_area)):
-                    frames[k] = []
-                    
-                # 读取和修复高分辨率帧
-                valid_frames_count = 0
-                for j in range(start_f, end_f):
-                    success, image = prefetcher.read()
-                    if not success:
-                        print(f"Warning: Failed to read frame {j}.")
-                        break
-                    
-                    frames_hr.append(image)
-                    valid_frames_count += 1
-                    
-                    if is_frame_number_in_ab_sections(j, ab_sections):
-                        for k in range(len(inpaint_area)):
-                            # 裁剪、缩放并添加到帧字典
-                            image_crop = image[inpaint_area[k][0]:inpaint_area[k][1], :, :]
-                            image_resize = cv2.resize(image_crop, (self.sttn_inpaint.model_input_width, self.sttn_inpaint.model_input_height))
-                            frames[k].append(image_resize)
-                
-                # 如果没有读取到有效帧，则跳过当前迭代
-                if valid_frames_count == 0:
-                    print(f"Warning: No valid frames found in range {start_f+1}-{end_f}. Skipping this segment.")
+                    tqdm.write(
+                        f"GPU VRAM: {vram_mb:.0f}MB, adjusting clip_gap: "
+                        f"{self.clip_gap} -> {effective_clip_gap}"
+                    )
+
+            rec_time = (
+                frame_info["len"] // effective_clip_gap
+                if frame_info["len"] % effective_clip_gap == 0
+                else frame_info["len"] // effective_clip_gap + 1
+            )
+
+            frame_prefetcher = FramePrefetcher(
+                reader,
+                buffer_size=min(max(effective_clip_gap, 10), 64),
+            )
+            chunk_prefetcher = ChunkPrefetcher(
+                frame_prefetcher,
+                frame_info,
+                inpaint_area,
+                ab_sections,
+                self.sttn_inpaint.model_input_width,
+                self.sttn_inpaint.model_input_height,
+                effective_clip_gap,
+                rec_time,
+                pin_memory=self.sttn_inpaint.use_amp,
+                queue_size=3,
+            )
+            gpu_processor = GpuChunkProcessor(
+                self.sttn_inpaint,
+                chunk_prefetcher,
+                inpaint_area,
+                queue_size=2,
+            )
+
+            for _ in range(rec_time):
+                chunk = gpu_processor.read()
+                if chunk is None:
+                    break
+                start_f = chunk["start_f"]
+                end_f = chunk["end_f"]
+                tqdm.write(f"Processing: {start_f + 1} - {end_f} / Total: {frame_info['len']}")
+
+                if chunk["valid_frames_count"] == 0:
+                    print(
+                        f"Warning: No valid frames found in range "
+                        f"{start_f + 1}-{end_f}. Skipping this segment."
+                    )
                     continue
-                    
-                # 对每个修复区域运行修复
-                for k in range(len(inpaint_area)):
-                    if len(frames[k]) > 0:  # 确保有帧可以处理
-                        comps[k] = self.sttn_inpaint.inpaint(frames[k])
-                    else:
-                        comps[k] = []
-                
-                # 如果有要修复的区域
-                if inpaint_area and valid_frames_count > 0:
-                    # 创建一个映射，记录哪些帧被处理了以及它们在frames[k]中的索引
-                    processed_frames_map = {}
-                    processed_idx = 0
-                    
-                    # 构建映射关系
-                    for j in range(start_f, end_f):
-                        if j - start_f < valid_frames_count and is_frame_number_in_ab_sections(j, ab_sections):
-                            processed_frames_map[j - start_f] = processed_idx
-                            processed_idx += 1
-                    
-                    # 应用修复结果
-                    for j in range(valid_frames_count):
-                        if input_sub_remover is not None and input_sub_remover.gui_mode:
-                            original_frame = frames_hr[j].copy()
-                        else:
-                            original_frame = None
-                            
-                        frame = frames_hr[j]
-                        
-                        # 只有被处理过的帧才应用修复结果
-                        if j in processed_frames_map:
-                            comp_idx = processed_frames_map[j]
-                            for k in range(len(inpaint_area)):
-                                if comp_idx < len(comps[k]):  # 确保索引有效
-                                    # 将修复的图像重新扩展到原始分辨率，并融合到原始帧
-                                    comp = cv2.resize(comps[k][comp_idx], (frame_info['W_ori'], split_h))
-                                    comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_BGR2RGB)
-                                    mask_area = mask[inpaint_area[k][0]:inpaint_area[k][1], :]
-                                    frame[inpaint_area[k][0]:inpaint_area[k][1], :, :] = mask_area * comp + (1 - mask_area) * frame[inpaint_area[k][0]:inpaint_area[k][1], :, :]
-                        
-                        writer.write(frame)
-                        
-                        if input_sub_remover is not None:
-                            if tbar is not None:
-                                input_sub_remover.update_progress(tbar, increment=1)
-                            if original_frame is not None and input_sub_remover.gui_mode:
-                                input_sub_remover.update_preview_with_comp(original_frame, frame)
-                # 每个chunk处理完后清理GPU缓存
-                del frames_hr, frames, comps
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-        except Exception as e:
-            print(f"Error during video processing: {str(e)}")
-            # 不抛出异常，允许程序继续执行
+
+                self._compose_and_write_chunk(
+                    chunk,
+                    frame_info,
+                    mask,
+                    split_h,
+                    inpaint_area,
+                    input_sub_remover,
+                    tbar,
+                    writer,
+                )
+
+                del chunk
+        except Exception as exc:
+            print(f"Error during video processing: {exc}")
         finally:
-            if reader:
-                prefetcher.release()
+            if gpu_processor:
+                gpu_processor.stop()
+            if chunk_prefetcher:
+                chunk_prefetcher.stop()
+            if frame_prefetcher:
+                frame_prefetcher.release()
+            elif reader:
+                reader.release()
             if writer:
                 writer.release()
 
 
-if __name__ == '__main__':
-    mask_path = '../../test/test.png'
-    video_path = '../../test/test.mp4'
-    # 记录开始时间
+if __name__ == "__main__":
+    from backend.tools.model_config import ModelConfig
+
+    mask_path = "../../test/test.png"
+    video_path = "../../test/test.mp4"
+    model_config = ModelConfig()
     start = time.time()
-    sttn_video_inpaint = STTNAutoInpaint(video_path, mask_path, clip_gap=config.getSttnMaxLoadNum())
+    sttn_video_inpaint = STTNAutoInpaint(
+        HardwareAccelerator.instance().device,
+        model_config.STTN_AUTO_MODEL_PATH,
+        video_path,
+        mask_path,
+        clip_gap=config.getSttnMaxLoadNum(),
+    )
     sttn_video_inpaint()
-    print(f'video generated at {sttn_video_inpaint.video_out_path}')
-    print(f'time cost: {time.time() - start}')
+    print(f"video generated at {sttn_video_inpaint.video_out_path}")
+    print(f"time cost: {time.time() - start}")

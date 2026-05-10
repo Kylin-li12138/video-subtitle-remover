@@ -1,4 +1,6 @@
 import sys
+import os
+import importlib.util
 from functools import cached_property
 
 import cv2
@@ -32,25 +34,29 @@ class SubtitleDetect:
         fps = cap.get(cv2.CAP_PROP_FPS)
         cap.release()
         if fps >= 60:
-            self.SAMPLE_STEP = 4
+            self.SAMPLE_STEP = 12
         elif fps >= 30:
-            self.SAMPLE_STEP = 3
+            self.SAMPLE_STEP = 8
         else:
-            self.SAMPLE_STEP = 2
+            self.SAMPLE_STEP = max(2, int(fps // 4) if fps > 0 else 4)
 
     @cached_property
     def text_detector(self):
+        os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+        import torch
         import paddle
         paddle.disable_signal_handler()
         from paddleocr import TextDetection
         hardware_accelerator = HardwareAccelerator.instance()
-        onnx_providers = hardware_accelerator.onnx_providers
+        has_hpi_plugin = importlib.util.find_spec("ultra_infer") is not None
+        onnx_providers = hardware_accelerator.onnx_providers if has_hpi_plugin else []
         model_config = ModelConfig()
         return TextDetection(
             model_name=model_config.DET_MODEL_NAME,
             model_dir=model_config.DET_MODEL_DIR,
             device="cpu",
             enable_hpi=len(onnx_providers) > 0,
+            enable_mkldnn=False,
         )
 
     def detect_subtitle(self, img):
@@ -80,6 +86,41 @@ class SubtitleDetect:
                             temp_list.append((xmin, xmax, ymin, ymax))
                             break
         return temp_list
+
+    def _valid_sub_areas(self, img):
+        height, width = img.shape[:2]
+        areas = []
+        for ymin, ymax, xmin, xmax in self.sub_areas or []:
+            ymin = max(0, min(height, int(ymin)))
+            ymax = max(0, min(height, int(ymax)))
+            xmin = max(0, min(width, int(xmin)))
+            xmax = max(0, min(width, int(xmax)))
+            if ymax > ymin and xmax > xmin:
+                areas.append((ymin, ymax, xmin, xmax))
+        return areas or [(0, height, 0, width)]
+
+    def detect_subtitle(self, img):
+        temp_list = []
+        for s_ymin, s_ymax, s_xmin, s_xmax in self._valid_sub_areas(img):
+            crop = img[s_ymin:s_ymax, s_xmin:s_xmax]
+            if crop.size == 0:
+                continue
+            results = self.text_detector.predict(crop)
+            for res in results:
+                dt_polys = res['dt_polys']
+                if dt_polys is None or len(dt_polys) == 0:
+                    continue
+                coordinate_list = get_coordinates(dt_polys.tolist())
+                if not coordinate_list:
+                    continue
+                for xmin, xmax, ymin, ymax in coordinate_list:
+                    temp_list.append((
+                        xmin + s_xmin,
+                        xmax + s_xmin,
+                        ymin + s_ymin,
+                        ymax + s_ymin,
+                    ))
+        return list(dict.fromkeys(temp_list))
 
     def find_subtitle_frame_no(self, sub_remover=None):
         video_cap = cv2.VideoCapture(get_readable_path(self.video_path))

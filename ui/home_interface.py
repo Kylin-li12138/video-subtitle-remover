@@ -4,8 +4,9 @@ import threading
 import multiprocessing
 import time
 import traceback
+from collections import deque
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout
-from PySide6.QtCore import Slot, QRect, Signal
+from PySide6.QtCore import Slot, QRect, Signal, QTimer
 from PySide6 import QtWidgets
 from datetime import datetime
 from qfluentwidgets import (PushButton, CardWidget, TextEdit, FluentIcon)
@@ -52,11 +53,16 @@ class HomeInterface(QWidget):
         self.running_process = None
         self._saved_inpaint_mode = None  # 保存图片锁定前的 inpaint 模式
         self._video_cap_lock = threading.Lock()  # 保护 video_cap 的线程锁
+        self._preview_frame_queue = deque(maxlen=120)
 
         # 当前正在处理的任务索引
         self.current_processing_task_index = -1
 
         self.__init_widgets()
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setInterval(33)
+        self._preview_timer.timeout.connect(self._drain_preview_frame_queue)
+        self._preview_timer.start()
         self.progress_signal.connect(self.update_progress)
         self.append_log_signal.connect(self.append_log)
         self.update_preview_with_comp_signal.connect(self.update_preview_with_comp)
@@ -110,6 +116,7 @@ class HomeInterface(QWidget):
         # 设置容器
         settings_container = CardWidget(self)
         self.setting_interface = SettingInterface(settings_container)
+        self.setting_interface.template_applied.connect(self._apply_template)
         settings_container.setLayout(self.setting_interface)
         right_layout.addWidget(settings_container)
         
@@ -188,6 +195,15 @@ class HomeInterface(QWidget):
         if get_current_task_index == -1:
             return
         self.task_list_component.update_task_option(get_current_task_index, TaskOptions.SUB_AREAS, selections)
+
+    def _apply_template(self, selection_rects: list):
+        """应用去水印模板到当前视频预览"""
+        self.video_display_component.set_selection_rects(selection_rects)
+        get_current_task_index = self.task_list_component.get_current_task_index()
+        if get_current_task_index != -1:
+            self.task_list_component.update_task_option(
+                get_current_task_index, TaskOptions.SUB_AREAS, selection_rects
+            )
 
     def on_task_selected(self, index, file_path):
         """处理任务被选中事件
@@ -292,6 +308,7 @@ class HomeInterface(QWidget):
     def stop_button_clicked(self):
         try:
             self._stop_event.set()
+            self._preview_frame_queue.clear()
             running_process = self.running_process
             if running_process:
                 ProcessManager.instance().terminate_by_process(running_process)
@@ -315,6 +332,7 @@ class HomeInterface(QWidget):
             return
 
         try:
+            self._preview_frame_queue.clear()
             # 获取所有待执行的任务
             pending_tasks = self.task_list_component.get_pending_tasks()
             if not pending_tasks:
@@ -475,6 +493,7 @@ class HomeInterface(QWidget):
         if pending_tasks:
             # 还有待执行任务, 忽略
             return
+        self._flush_latest_preview_frame()
         # 处理完成后恢复界面可用性
         self.run_button.setVisible(True)
         self.stop_button.setVisible(False)
@@ -554,9 +573,23 @@ class HomeInterface(QWidget):
         preview_frame = cv2.hconcat([frame_ori, frame_comp])
         # 先缩放图像
         resized_frame = self._img_resize(preview_frame)
-        # 更新视频显示（这会同时保存current_pixmap）
-        self.video_display_component.update_video_display(resized_frame, draw_selection=False)
+        self._preview_frame_queue.append(resized_frame)
+
+    def _show_preview_frame(self, frame):
+        self.video_display_component.update_video_display(frame, draw_selection=False)
         self.video_display_component.set_dragger_enabled(False)
+
+    def _drain_preview_frame_queue(self):
+        if not self._preview_frame_queue:
+            return
+        self._show_preview_frame(self._preview_frame_queue.popleft())
+
+    def _flush_latest_preview_frame(self):
+        if not self._preview_frame_queue:
+            return
+        latest_frame = self._preview_frame_queue.pop()
+        self._preview_frame_queue.clear()
+        self._show_preview_frame(latest_frame)
 
     @Slot(object)
     def on_task_error(self, e):

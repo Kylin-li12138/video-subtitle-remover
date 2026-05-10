@@ -2,16 +2,18 @@
 @desc: 高级设置页面
 """
 
+import os
 from PySide6 import QtWidgets, QtCore, QtGui
 from PySide6.QtWidgets import QFileDialog
 from qfluentwidgets import (ScrollArea, ExpandLayout, CardWidget, SubtitleLabel,
                            FluentIcon, NavigationWidget, NavigationItemPosition,
                            SettingCardGroup, RangeSettingCard, SwitchSettingCard,
                            HyperlinkCard, PrimaryPushSettingCard, PushSettingCard,
-                           MessageBox)
+                           MessageBox, InfoBar)
 from backend.config import config, tr, VERSION, PROJECT_HOME_URL, PROJECT_ISSUES_URL, PROJECT_RELEASES_URL
 from backend.tools.version_service import VersionService
 from backend.tools.concurrent import TaskExecutor
+
 
 class AdvancedSettingInterface(ScrollArea):
     """高级设置页面"""
@@ -20,24 +22,20 @@ class AdvancedSettingInterface(ScrollArea):
         super().__init__(parent)
         self.parent = parent
         self.version_manager = VersionService()
+        self._updating = False
         self.__init_widgets()
 
     def __init_widgets(self):
-        # 创建滚动内容的容器
         self.scrollWidget = QtWidgets.QWidget(self)
         self.expandLayout = ExpandLayout(self.scrollWidget)
         
-        # 设置滚动区域属性
         self.setWidget(self.scrollWidget)
         self.enableTransparentBackground()
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-        
-        # 设置滚动区域样式以适应主题
         self.setAttribute(QtCore.Qt.WA_StyledBackground)
         
-        # 设置UI
         self.setup_ui()
         self.setup_layout()
 
@@ -73,15 +71,10 @@ class AdvancedSettingInterface(ScrollArea):
         
     def setup_ui(self):
         """设置UI"""
-        # 字幕检测设置组
         self.subtitle_detection_group = SettingCardGroup(tr["Setting"]["SubtitleDetectionSetting"], self.scrollWidget)
-        # STTN设置组
         self.sttn_group = SettingCardGroup(tr["Setting"]["SttnSetting"], self.scrollWidget)
-        # Propainter设置组
         self.propainter_group = SettingCardGroup(tr["Setting"]["ProPainterSetting"], self.scrollWidget)
-        # 高级设置组
         self.advanced_group = SettingCardGroup(tr["Setting"]["AdvancedSetting"], self.scrollWidget)
-        # 关于设置组
         self.about_group = SettingCardGroup(tr["Setting"]["AboutSetting"], self.scrollWidget)
         
         self.subtitle_yx_axis_difference_pixel = RangeSettingCard(
@@ -172,7 +165,6 @@ class AdvancedSettingInterface(ScrollArea):
             parent=self.propainter_group
         )
 
-        # 视频保存路径
         self.save_directory = PushSettingCard(
             text=tr["Setting"]["ChooseDirectory"],
             icon=FluentIcon.DOWNLOAD,
@@ -190,7 +182,6 @@ class AdvancedSettingInterface(ScrollArea):
             parent=self.advanced_group
         )
 
-        # 添加反馈链接
         self.feedback = PrimaryPushSettingCard(
             text=tr["Setting"]["FeedbackButton"],
             icon=FluentIcon.MAIL,
@@ -201,7 +192,7 @@ class AdvancedSettingInterface(ScrollArea):
         self.feedback.clicked.connect(lambda: QtGui.QDesktopServices.openUrl(
             QtCore.QUrl(PROJECT_ISSUES_URL)
         ))
-        # 添加版权信息
+
         self.copyright = PrimaryPushSettingCard(
             text=tr["Setting"]["CopyrightButton"],
             icon=FluentIcon.MAIL,
@@ -210,7 +201,7 @@ class AdvancedSettingInterface(ScrollArea):
             parent=self.about_group
         )
         self.copyright.clicked.connect(lambda: self.check_update())
-        # 添加项目链接
+
         self.project_link = HyperlinkCard(
             url=PROJECT_HOME_URL,
             text=PROJECT_HOME_URL,
@@ -220,8 +211,11 @@ class AdvancedSettingInterface(ScrollArea):
             parent=self.about_group
         )
 
+    # ------------------------------------------------------------------
+    #  消息对话框
+    # ------------------------------------------------------------------
+
     def show_message_box(self, title: str, content: str, showYesButton=False, yesSlot=None):
-        """ show message box """
         w = MessageBox(title, content, self)
         if not showYesButton:
             w.cancelButton.setText(self.tr('Close'))
@@ -231,35 +225,126 @@ class AdvancedSettingInterface(ScrollArea):
         if w.exec() and yesSlot is not None:
             yesSlot()
 
+    # ------------------------------------------------------------------
+    #  版本检查
+    # ------------------------------------------------------------------
+
     def check_update(self, ignore=False):
-        """ check software update
-
-        Parameters
-        ----------
-        ignore: bool
-            ignore message box when no updates are available
-        """
         TaskExecutor.runTask(self.version_manager.has_new_version).then(
-            lambda success: self.on_version_info_fetched(success, ignore))
+            lambda success: self._on_version_checked(success, ignore))
 
-    def on_version_info_fetched(self, success, ignore=False):
-        if success:
+    def _on_version_checked(self, has_update, ignore=False):
+        if not has_update:
+            if not ignore:
+                self.show_message_box(
+                    tr["Setting"]["NoUpdatesAvailableTitle"],
+                    tr["Setting"]["NoUpdatesAvailableDesc"],
+                )
+            return
+
+        new_ver = self.version_manager.lastest_version
+        has_exe = self.version_manager.get_download_url() is not None
+
+        if has_exe:
+            self._show_exe_update_dialog(new_ver)
+        else:
             self.show_message_box(
                 tr["Setting"]["UpdatesAvailableTitle"],
-                tr["Setting"]["UpdatesAvailableDesc"].format(self.version_manager.lastest_version),
+                tr["Setting"]["UpdatesAvailableDesc"].format(new_ver),
                 True,
-                lambda: QtGui.QDesktopServices.openUrl(
-                    QtCore.QUrl(PROJECT_RELEASES_URL)
-                )
+                lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl(PROJECT_RELEASES_URL))
             )
-        elif not ignore:
+
+    # ------------------------------------------------------------------
+    #  .exe 补丁更新流程
+    # ------------------------------------------------------------------
+
+    def _show_exe_update_dialog(self, new_ver: str):
+        _tr = _update_tr()
+        title = _tr("UpdateTitle", f"发现新版本 v{new_ver}")
+        body = _tr("UpdateBody",
+                    "检测到更新补丁可用，可直接在线更新（体积很小，无需重新下载完整安装包）。\n\n"
+                    "当前版本: v{current}\n最新版本: v{latest}").format(
+            current=self.version_manager.current_version, latest=new_ver)
+
+        w = MessageBox(title, body, self)
+        w.yesButton.setText(_tr("UpdateNowBtn", "立即更新"))
+        w.cancelButton.setText(_tr("UpdateLaterBtn", "稍后"))
+
+        if w.exec():
+            self._start_update()
+
+    def _start_update(self):
+        if self._updating:
+            return
+        self._updating = True
+
+        _tr = _update_tr()
+        InfoBar.info(
+            _tr("DownloadingTitle", "正在下载更新"),
+            _tr("DownloadingDesc", "正在下载补丁，请稍候…"),
+            duration=3000, parent=self)
+
+        TaskExecutor.runTask(self.version_manager.download_update).then(
+            self._on_download_done)
+
+    def _on_download_done(self, exe_path):
+        _tr = _update_tr()
+        if not exe_path:
+            self._updating = False
+            InfoBar.error(
+                _tr("DownloadFailedTitle", "下载失败"),
+                _tr("DownloadFailedDesc", "更新包下载失败，请检查网络后重试"),
+                duration=5000, parent=self)
+            return
+
+        InfoBar.info(
+            _tr("InstallingTitle", "正在安装"),
+            _tr("InstallingDesc", "正在应用更新…"),
+            duration=2000, parent=self)
+
+        TaskExecutor.runTask(
+            self.version_manager.apply_update, exe_path
+        ).then(self._on_update_done)
+
+    def _on_update_done(self, result):
+        self._updating = False
+        _tr = _update_tr()
+
+        if result is None:
+            InfoBar.error(
+                _tr("UpdateFailedTitle", "更新失败"),
+                _tr("UpdateFailedUnknown", "应用更新时发生未知错误"),
+                duration=5000, parent=self)
+            return
+
+        success, message = result
+        if success:
             self.show_message_box(
-                tr["Setting"]["NoUpdatesAvailableTitle"],
-                tr["Setting"]["NoUpdatesAvailableDesc"],
+                _tr("UpdateSuccessTitle", "更新完成"),
+                _tr("UpdateSuccessDesc",
+                     "{msg}\n\n点击确认重启应用。").format(msg=message),
+                showYesButton=True,
+                yesSlot=self._restart_app,
             )
-    
+        else:
+            InfoBar.error(
+                _tr("UpdateFailedTitle", "更新失败"),
+                message, duration=8000, parent=self)
+
+    @staticmethod
+    def _restart_app():
+        import subprocess as _sp
+        exe = QtWidgets.QApplication.applicationFilePath()
+        if exe and os.path.exists(exe):
+            _sp.Popen([exe])
+        QtWidgets.QApplication.quit()
+
+    # ------------------------------------------------------------------
+    #  保存目录
+    # ------------------------------------------------------------------
+
     def choose_save_directory(self):
-        """选择保存目录"""
         last_save_directory = "./" if not config.saveDirectory.value else config.saveDirectory.value
         folder = QFileDialog.getExistingDirectory(
             self, tr['Setting']['ChooseDirectory'], last_save_directory)
@@ -267,4 +352,17 @@ class AdvancedSettingInterface(ScrollArea):
             folder = ""
 
         config.set(config.saveDirectory, folder)
-        self.save_directory.setContent(tr["Setting"]["SaveDirectoryDefault"] if not config.saveDirectory.value else config.saveDirectory.value)
+        self.save_directory.setContent(
+            tr["Setting"]["SaveDirectoryDefault"]
+            if not config.saveDirectory.value
+            else config.saveDirectory.value)
+
+
+def _update_tr():
+    """从 i18n 的 [Update] 段读取文本，找不到则用默认值"""
+    def _get(key, default):
+        try:
+            return tr["Update"][key]
+        except (KeyError, TypeError):
+            return default
+    return _get

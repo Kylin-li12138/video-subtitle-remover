@@ -102,3 +102,54 @@ class FFmpegVideoWriter:
         except subprocess.TimeoutExpired:
             self._process.terminate()
             self._process.wait(timeout=5)
+
+
+class AsyncVideoWriter:
+    """
+    Queue video frames to a background writer thread.
+
+    The inpaint path mixes GPU inference with CPU encoding. Keeping writes off
+    the main processing thread lets the next chunk start sooner while preserving
+    frame order.
+    """
+
+    def __init__(self, writer, maxsize=32):
+        self._writer = writer
+        self._queue = queue.Queue(maxsize=maxsize)
+        self._closed = False
+        self._error = None
+        self._thread = threading.Thread(target=self._write_loop, daemon=True)
+        self._thread.start()
+
+    def _write_loop(self):
+        while True:
+            frame = self._queue.get()
+            try:
+                if frame is None:
+                    return
+                self._writer.write(frame)
+            except Exception as exc:
+                self._error = exc
+            finally:
+                self._queue.task_done()
+
+    def _raise_if_failed(self):
+        if self._error is not None:
+            raise self._error
+
+    def write(self, frame):
+        self._raise_if_failed()
+        if self._closed:
+            return
+        self._queue.put(frame)
+        self._raise_if_failed()
+
+    def release(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._queue.put(None)
+        self._queue.join()
+        self._thread.join(timeout=30)
+        self._writer.release()
+        self._raise_if_failed()
