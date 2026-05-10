@@ -7,14 +7,11 @@ from backend.tools.constant import InpaintMode, SubtitleDetectMode
 import configparser
 
 # 项目版本号
-VERSION = "1.0.0"
-PROJECT_HOME_URL = "https://github.com/YaoFANGUK/video-subtitle-remover"
+VERSION = "1.0.1"
+PROJECT_HOME_URL = "https://github.com/Kylin-li12138/video-subtitle-remover"
 PROJECT_ISSUES_URL = PROJECT_HOME_URL + "/issues"
 PROJECT_RELEASES_URL = PROJECT_HOME_URL + "/releases"
-PROJECT_UPDATE_URLS = [
-    "https://api.github.com/repos/YaoFANGUK/video-subtitle-remover/releases/latest",
-    "https://accelerate.xdow.net/api/repos/YaoFANGUK/video-subtitle-remover/releases/latest",
-] 
+PROJECT_UPDATE_URLS = [] 
 
 # 硬件加速选项开关
 HARDWARD_ACCELERATION_OPTION = True
