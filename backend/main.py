@@ -295,41 +295,50 @@ class SubtitleRemover:
                 start_frame_index = current_frame_index
                 end_frame_index = start_end_map[current_frame_index]
                 tbar.write(f'processing frame {start_frame_index} to {end_frame_index}')
-                # 用于存储需要去字幕的视频帧
-                frames_need_inpaint = list()
-                frames_need_inpaint.append(frame)
-                inner_index = 0
-                # 接着往下读，直到读取到尾巴
-                for j in range(end_frame_index - start_frame_index):
-                    ret, frame = reader.read()
-                    if not ret:
-                        break
-                    current_frame_index += 1
-                    frames_need_inpaint.append(frame)
                 mask_area_coordinates = []
-                # 1. 获取当前批次的mask坐标全集
                 for mask_index in range(start_frame_index, end_frame_index):
                     if mask_index in sub_list.keys():
                         for area in sub_list[mask_index]:
                             xmin, xmax, ymin, ymax = area
-                            # 判断是不是非字幕区域(如果宽大于长，则认为是错误检测)
                             if (ymax - ymin) - (xmax - xmin) > config.subtitleYXAxisDifferencePixel.value:
                                 continue
                             if area not in mask_area_coordinates:
                                 mask_area_coordinates.append(area)
-                # 1. 获取当前批次使用的mask
                 mask = create_mask(self.mask_size, mask_area_coordinates)
-                # self.append_output(f'inpaint with mask: {mask_area_coordinates}')
-                for batch in batch_generator(frames_need_inpaint, config.getSttnMaxLoadNum()):
-                    # 2. 调用批推理
-                    if len(batch) >= 1:
-                        inpainted_frames = model(batch, mask)
-                        for i, inpainted_frame in enumerate(inpainted_frames):
-                            self.video_writer.write(inpainted_frame)
-                            # self.append_output(f'write frame: {start_frame_index + inner_index} with mask')
-                            inner_index += 1
-                            self.update_preview_with_comp(np.clip(batch[i]+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_frame)
-                    self.update_progress(tbar, increment=len(batch))
+
+                if hasattr(model, 'inpaint'):
+                    # 逐帧模型 (LAMA / OpenCV): 每帧立即处理、写入、预览
+                    inpainted = model.inpaint(frame, mask)
+                    self.video_writer.write(inpainted)
+                    self.update_preview_with_comp(np.clip(frame+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted)
+                    self.update_progress(tbar, increment=1)
+                    for j in range(end_frame_index - start_frame_index):
+                        ret, frame = reader.read()
+                        if not ret:
+                            break
+                        current_frame_index += 1
+                        inpainted = model.inpaint(frame, mask)
+                        self.video_writer.write(inpainted)
+                        self.update_preview_with_comp(np.clip(frame+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted)
+                        self.update_progress(tbar, increment=1)
+                else:
+                    # 批量模型 (STTN_DET): 收集帧后批处理
+                    frames_need_inpaint = [frame]
+                    inner_index = 0
+                    for j in range(end_frame_index - start_frame_index):
+                        ret, frame = reader.read()
+                        if not ret:
+                            break
+                        current_frame_index += 1
+                        frames_need_inpaint.append(frame)
+                    for batch in batch_generator(frames_need_inpaint, config.getSttnMaxLoadNum()):
+                        if len(batch) >= 1:
+                            inpainted_frames = model(batch, mask)
+                            for i, inpainted_frame in enumerate(inpainted_frames):
+                                self.video_writer.write(inpainted_frame)
+                                inner_index += 1
+                                self.update_preview_with_comp(np.clip(batch[i]+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_frame)
+                        self.update_progress(tbar, increment=len(batch))
         reader.stop()
 
     def run(self):
