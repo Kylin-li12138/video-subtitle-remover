@@ -524,6 +524,12 @@ class ResourceDownloader(QThread):
             self.finished_signal.emit(True, "没有需要下载的资源")
             return
 
+        try:
+            self._ensure_writable()
+        except PermissionError as e:
+            self.finished_signal.emit(False, str(e))
+            return
+
         has_error = False
         for idx, res in enumerate(self._resources):
             if self._cancelled:
@@ -574,25 +580,21 @@ class ResourceDownloader(QThread):
 
     def _download_file_resource(self, res: ResourceInfo, idx: int, total: int):
         dest_base = os.path.join(self._base_dir, res.target_dir) if res.target_dir else self._base_dir
-        staging = tempfile.mkdtemp(prefix="vsr_dl_")
-        try:
-            for fi, (url, rel_path) in enumerate(res.files):
-                if self._cancelled:
-                    return
-                url = self._apply_proxy(url)
-                fname = rel_path or url.rsplit("/", 1)[-1]
-                self.output_signal.emit(f"  [{fi+1}/{len(res.files)}] {fname}")
-                tmp_path = self._download_file(url, idx, total)
-                if self._cancelled:
-                    self._cleanup(tmp_path)
-                    return
-                staged = os.path.join(staging, fname)
-                os.makedirs(os.path.dirname(staged), exist_ok=True)
-                shutil.move(tmp_path, staged)
-
-            self._copy_to_target(staging, dest_base)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
+        os.makedirs(dest_base, exist_ok=True)
+        for fi, (url, rel_path) in enumerate(res.files):
+            if self._cancelled:
+                return
+            url = self._apply_proxy(url)
+            fname = rel_path or url.rsplit("/", 1)[-1]
+            self.output_signal.emit(f"  [{fi+1}/{len(res.files)}] {fname}")
+            dest = os.path.join(dest_base, fname)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            tmp_path = self._download_file(url, idx, total)
+            if self._cancelled:
+                self._cleanup(tmp_path)
+                return
+            shutil.move(tmp_path, dest)
+            self.output_signal.emit(f"        -> {dest}")
 
     # -- internal helpers -----------------------------------------------------
 
@@ -636,64 +638,86 @@ class ResourceDownloader(QThread):
         return tmp_path
 
     def _extract_zip(self, zip_path: str, res: ResourceInfo):
-        """解压 zip 到目标目录，自动处理嵌套顶层目录和权限提升"""
+        """解压 zip 到目标目录，自动处理嵌套顶层目录"""
         extract_to = os.path.join(self._base_dir, res.target_dir) if res.target_dir else self._base_dir
+        os.makedirs(extract_to, exist_ok=True)
 
-        staging = tempfile.mkdtemp(prefix="vsr_res_")
-        try:
-            self.output_signal.emit(f"  正在解压...")
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                names = zf.namelist()
-                top_dirs = {n.split("/")[0] for n in names if "/" in n}
+        self.output_signal.emit(f"  正在解压到 {extract_to} ...")
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = zf.namelist()
+            top_dirs = {n.split("/")[0] for n in names if "/" in n}
 
-                if res.name == "FFmpeg" and len(top_dirs) == 1:
+            if res.name == "FFmpeg" and len(top_dirs) == 1:
+                staging = tempfile.mkdtemp(prefix="vsr_ffmpeg_")
+                try:
                     zf.extractall(staging)
                     nested = os.path.join(staging, top_dirs.pop())
-                    final_staging = os.path.join(staging, "_final")
-                    os.makedirs(final_staging, exist_ok=True)
-                    shutil.move(nested, os.path.join(final_staging, "ffmpeg"))
-                    staging_src = final_staging
-                    dest_dir = self._base_dir
-                else:
-                    zf.extractall(staging)
-                    staging_src = staging
-                    dest_dir = extract_to
+                    dest = os.path.join(self._base_dir, "ffmpeg")
+                    if os.path.exists(dest):
+                        shutil.rmtree(dest)
+                    shutil.move(nested, dest)
+                finally:
+                    shutil.rmtree(staging, ignore_errors=True)
+            else:
+                zf.extractall(extract_to)
+        self.output_signal.emit("  解压完成")
 
-            self._copy_to_target(staging_src, dest_dir)
-            self.output_signal.emit("  解压完成")
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
-
-    def _copy_to_target(self, src: str, dst: str):
-        """复制文件到目标目录，权限不足时自动提权"""
+    def _ensure_writable(self):
+        """在下载前一次性检查并获取目标目录的写入权限"""
+        probe = os.path.join(self._base_dir, f".vsr_probe_{os.getpid()}")
         try:
-            shutil.copytree(src, dst, dirs_exist_ok=True)
+            os.makedirs(probe, exist_ok=True)
+            os.rmdir(probe)
+            return
         except PermissionError:
-            self.output_signal.emit("  目标目录需要管理员权限，正在提权...")
-            self._elevated_copy(src, dst)
+            pass
 
-    def _elevated_copy(self, src: str, dst: str):
-        """通过 UAC 提权复制目录"""
+        self.output_signal.emit("目标目录需要管理员权限，正在申请写入权限...\n")
+
+        username = os.environ.get("USERNAME", "")
+        if not username:
+            raise PermissionError("无法获取当前用户名，请以管理员身份运行程序")
+
+        dirs_to_grant = set()
+        for res in self._resources:
+            if res.target_dir:
+                top = res.target_dir.split("/")[0].split("\\")[0]
+                dirs_to_grant.add(os.path.join(self._base_dir, top))
+            else:
+                dirs_to_grant.add(self._base_dir)
+
         bat_fd, bat_path = tempfile.mkstemp(suffix=".bat")
         try:
-            with os.fdopen(bat_fd, "w") as f:
-                f.write(f'@robocopy "{src}" "{dst}" /E /NFL /NDL /NJH /NJS /R:1 /W:1\n')
+            with os.fdopen(bat_fd, "w", encoding="mbcs") as f:
+                f.write("@echo off\n")
+                for d in sorted(dirs_to_grant):
+                    f.write(f'if not exist "{d}" mkdir "{d}"\n')
+                    f.write(f'icacls "{d}" /grant "{username}:(OI)(CI)M" /T /Q\n')
             result = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
                  f"Start-Process -FilePath '{bat_path}' -Verb RunAs -Wait"],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True, text=True, timeout=60,
             )
-            if result.returncode not in (0, None):
-                self.output_signal.emit(f"  提权复制返回码: {result.returncode}")
+            if result.returncode != 0:
+                self.output_signal.emit(f"  权限申请返回码: {result.returncode}")
         except subprocess.TimeoutExpired:
-            raise PermissionError("提权复制超时")
+            raise PermissionError("权限申请超时，请以管理员身份运行程序")
         except Exception as e:
-            raise PermissionError(f"提权复制失败: {e}")
+            raise PermissionError(f"权限申请失败: {e}")
         finally:
             try:
                 os.remove(bat_path)
             except OSError:
                 pass
+
+        try:
+            os.makedirs(probe, exist_ok=True)
+            os.rmdir(probe)
+            self.output_signal.emit("写入权限已获取\n")
+        except PermissionError:
+            raise PermissionError(
+                "无法获取目标目录的写入权限，请以管理员身份运行程序"
+            )
 
     @staticmethod
     def _cleanup(path: str):
