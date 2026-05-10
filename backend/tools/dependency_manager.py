@@ -402,12 +402,16 @@ DEFAULT_RESOURCE_MIRROR = "hf-mirror 国内镜像 (推荐)"
 RESOURCE_DOWNLOADS: list[ResourceInfo] = [
     ResourceInfo(
         name="Big-LAMA",
-        filename="big-lama.zip",
-        target_dir="models",
-        size_mb=364,
+        filename="",
+        target_dir="models/big-lama",
+        size_mb=200,
         description="图像修复模型 (LAMA 算法)",
         check_paths=["models/big-lama"],
-        files=[(_HF_RESOLVE.format("smartywu/big-lama", "big-lama.zip"), None)],
+        files=[
+            (_HF_RESOLVE.format(
+                "spaces/paulpang/video-subtitle-remover",
+                "backend/models/big-lama/big-lama.pt"), "big-lama.pt"),
+        ],
     ),
     ResourceInfo(
         name="ProPainter",
@@ -450,7 +454,7 @@ RESOURCE_DOWNLOADS: list[ResourceInfo] = [
         target_dir="",
         size_mb=210,
         description="音视频处理工具",
-        check_paths=["ffmpeg"],
+        check_paths=["ffmpeg/win_x64"],
         files=[(_GH_RELEASE.format(
             "BtbN/FFmpeg-Builds", "latest",
             "ffmpeg-master-latest-win64-gpl.zip"), None)],
@@ -652,10 +656,17 @@ class ResourceDownloader(QThread):
                 try:
                     zf.extractall(staging)
                     nested = os.path.join(staging, top_dirs.pop())
-                    dest = os.path.join(self._base_dir, "ffmpeg")
-                    if os.path.exists(dest):
-                        shutil.rmtree(dest)
-                    shutil.move(nested, dest)
+                    bin_dir = os.path.join(nested, "bin")
+                    src_exe = os.path.join(bin_dir, "ffmpeg.exe")
+                    if os.path.isfile(src_exe):
+                        dest_dir = os.path.join(self._base_dir, "ffmpeg", "win_x64")
+                        os.makedirs(dest_dir, exist_ok=True)
+                        shutil.copy2(src_exe, os.path.join(dest_dir, "ffmpeg.exe"))
+                    else:
+                        dest = os.path.join(self._base_dir, "ffmpeg")
+                        if os.path.exists(dest):
+                            shutil.rmtree(dest)
+                        shutil.move(nested, dest)
                 finally:
                     shutil.rmtree(staging, ignore_errors=True)
             else:

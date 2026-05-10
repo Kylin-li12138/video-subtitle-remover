@@ -230,11 +230,23 @@ class AdvancedSettingInterface(ScrollArea):
     # ------------------------------------------------------------------
 
     def check_update(self, ignore=False):
+        print("[Update] 正在检查更新...")
         TaskExecutor.runTask(self.version_manager.has_new_version).then(
-            lambda success: self._on_version_checked(success, ignore))
+            lambda success: self._on_version_checked(success, ignore),
+            onFailed=lambda fut: self._on_update_check_failed(fut, ignore),
+        )
+
+    def _on_update_check_failed(self, fut, ignore=False):
+        print(f"[Update] 检查更新失败: {fut.getException() if hasattr(fut, 'getException') else fut}")
+        if not ignore:
+            self.show_message_box(
+                tr["Setting"]["NoUpdatesAvailableTitle"],
+                "检查更新时出错，请检查网络连接",
+            )
 
     def _on_version_checked(self, has_update, ignore=False):
         if not has_update:
+            print(f"[Update] 当前已是最新版本 v{self.version_manager.current_version}")
             if not ignore:
                 self.show_message_box(
                     tr["Setting"]["NoUpdatesAvailableTitle"],
