@@ -1,13 +1,31 @@
 ﻿
 import os
+import sys
 from pathlib import Path
 from qfluentwidgets import (qconfig, ConfigItem, QConfig, OptionsValidator, BoolValidator, OptionsConfigItem, 
                             EnumSerializer, RangeValidator, RangeConfigItem, ConfigValidator)
 from backend.tools.constant import InpaintMode, SubtitleDetectMode
 import configparser
 
-# 项目版本号
-VERSION = "1.1.1"
+# 项目版本号 —— 优先从注册表读取（补丁安装时会更新注册表）
+_BUILTIN_VERSION = "1.1.2"
+
+def _get_version() -> str:
+    if sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Video Subtitle Remover"
+            ) as key:
+                ver, _ = winreg.QueryValueEx(key, "AppVersion")
+                if ver:
+                    return ver
+        except Exception:
+            pass
+    return _BUILTIN_VERSION
+
+VERSION = _get_version()
 PROJECT_HOME_URL = "https://github.com/Kylin-li12138/video-subtitle-remover"
 PROJECT_ISSUES_URL = PROJECT_HOME_URL + "/issues"
 PROJECT_RELEASES_URL = PROJECT_HOME_URL + "/releases"
