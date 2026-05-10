@@ -26,7 +26,8 @@ class ModelConfig:
 
         if not os.path.isdir(self.LAMA_MODEL_DIR):
             self.missing_models.append("Big-LAMA")
-        if not os.path.isdir(os.path.dirname(self.STTN_AUTO_MODEL_PATH)):
+        if not os.path.isdir(os.path.dirname(self.STTN_AUTO_MODEL_PATH)) or \
+           not os.path.isdir(os.path.dirname(self.STTN_DET_MODEL_PATH)):
             self.missing_models.append("STTN")
         if not os.path.isdir(self.PROPAINTER_MODEL_DIR):
             self.missing_models.append("ProPainter")

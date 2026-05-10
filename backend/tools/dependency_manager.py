@@ -439,13 +439,16 @@ RESOURCE_DOWNLOADS: list[ResourceInfo] = [
         name="STTN",
         filename="",
         target_dir="models",
-        size_mb=63,
+        size_mb=126,
         description="视频字幕擦除模型 (STTN 算法)",
-        check_paths=["models/sttn-auto"],
+        check_paths=["models/sttn-auto", "models/sttn-det"],
         files=[
             (_HF_RESOLVE.format(
                 "spaces/paulpang/video-subtitle-remover",
                 "backend/models/sttn/infer_model.pth"), "sttn-auto/infer_model.pth"),
+            (_HF_RESOLVE.format(
+                "spaces/paulpang/video-subtitle-remover",
+                "backend/models/sttn/infer_model.pth"), "sttn-det/sttn.pth"),
         ],
     ),
     ResourceInfo(
