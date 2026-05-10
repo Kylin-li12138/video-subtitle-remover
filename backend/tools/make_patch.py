@@ -93,9 +93,9 @@ def _sha256(filepath: Path) -> str:
 def _read_version() -> str:
     config_py = PROJ_ROOT / "backend" / "config.py"
     for line in config_py.read_text(encoding="utf-8").splitlines():
-        if line.strip().startswith("VERSION"):
+        if line.strip().startswith("_BUILTIN_VERSION"):
             return line.split("=")[1].strip().strip('"').strip("'")
-    raise RuntimeError("无法从 backend/config.py 读取 VERSION")
+    raise RuntimeError("无法从 backend/config.py 读取 _BUILTIN_VERSION")
 
 
 def _write_version(version: str):
@@ -104,14 +104,14 @@ def _write_version(version: str):
     config_py = PROJ_ROOT / "backend" / "config.py"
     content = config_py.read_text(encoding="utf-8")
     new_content = re.sub(
-        r'^(VERSION\s*=\s*)["\'].*?["\']',
+        r'^(_BUILTIN_VERSION\s*=\s*)["\'].*?["\']',
         f'\\1"{version}"',
         content,
         count=1,
         flags=re.MULTILINE,
     )
     config_py.write_text(new_content, encoding="utf-8")
-    print(f"[版本] backend/config.py VERSION 已更新为 {version}")
+    print(f"[版本] backend/config.py _BUILTIN_VERSION 已更新为 {version}")
 
 
 def _bump_patch(version: str) -> str:
