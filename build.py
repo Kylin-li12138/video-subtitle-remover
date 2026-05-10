@@ -44,12 +44,12 @@ def sync_iss_version(version: str, release_dir: str):
 
     content = re.sub(
         r'(#define MyAppVersion )"[^"]+"',
-        rf'\1"{version}"',
+        lambda m: f'{m.group(1)}"{version}"',
         content,
     )
     content = re.sub(
         r'(#define QPTReleaseDir )"[^"]+"',
-        rf'\1"{release_dir}"',
+        lambda m: f'{m.group(1)}"{release_dir}"',
         content,
     )
 

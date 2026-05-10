@@ -11,7 +11,7 @@
 ; ============================================================
 
 #define MyAppName "Video Subtitle Remover"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "VSR Team"
 #define MyAppURL "https://github.com/Kylin-li12138/video-subtitle-remover"
 #define MyAppExeName "启动程序.exe"

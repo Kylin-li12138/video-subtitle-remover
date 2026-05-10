@@ -58,6 +58,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "  提交失败！" -ForegroundColor Red
     exit 1
 }
+git tag -d "v$newVersion" 2>$null
 git tag "v$newVersion"
 Write-Host "  tag v$newVersion 已创建"
 
