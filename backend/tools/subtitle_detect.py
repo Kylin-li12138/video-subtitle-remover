@@ -42,7 +42,6 @@ class SubtitleDetect:
 
     @cached_property
     def text_detector(self):
-        os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
         import torch
         import paddle
         paddle.disable_signal_handler()
@@ -51,6 +50,8 @@ class SubtitleDetect:
         has_hpi_plugin = importlib.util.find_spec("ultra_infer") is not None
         onnx_providers = hardware_accelerator.onnx_providers if has_hpi_plugin else []
         model_config = ModelConfig()
+        if os.path.isdir(model_config.DET_MODEL_DIR):
+            os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
         return TextDetection(
             model_name=model_config.DET_MODEL_NAME,
             model_dir=model_config.DET_MODEL_DIR,
