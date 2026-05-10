@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
+import os
 import sys
 import subprocess
 import importlib.util
 import re
-from dataclasses import dataclass
+import tempfile
+import zipfile
+from dataclasses import dataclass, field
 from typing import Optional
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 
-from PySide6.QtCore import QObject, Signal, QProcess
+from PySide6.QtCore import QObject, Signal, QProcess, QThread
 
 
 @dataclass
@@ -354,3 +359,227 @@ class DependencyInstaller(QObject):
             self._process.waitForFinished(3000)
         self.output_signal.emit("\n[已取消] 安装已被用户中止")
         self.finished_signal.emit(False, "用户取消安装")
+
+
+# ---------------------------------------------------------------------------
+#  资源文件 (模型 / FFmpeg) 在线下载
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ResourceInfo:
+    name: str
+    filename: str
+    target_dir: str
+    size_mb: int
+    description: str
+    check_paths: list = field(default_factory=list)
+    installed: bool = False
+
+
+GITHUB_RELEASE_BASE = (
+    "https://github.com/Kylin-li12138/video-subtitle-remover"
+    "/releases/download/models-v1/"
+)
+
+RESOURCE_MIRROR_PRESETS = {
+    "ghfast 加速 (推荐)": f"https://ghfast.top/{GITHUB_RELEASE_BASE}",
+    "GitHub 直连": GITHUB_RELEASE_BASE,
+}
+
+DEFAULT_RESOURCE_MIRROR = "ghfast 加速 (推荐)"
+
+RESOURCE_DOWNLOADS: list[ResourceInfo] = [
+    ResourceInfo(
+        name="Big-LAMA",
+        filename="big-lama.zip",
+        target_dir="models",
+        size_mb=200,
+        description="图像修复模型 (LAMA 算法)",
+        check_paths=["models/big-lama"],
+    ),
+    ResourceInfo(
+        name="ProPainter",
+        filename="propainter.zip",
+        target_dir="models",
+        size_mb=200,
+        description="视频修复模型 (ProPainter 算法)",
+        check_paths=["models/propainter"],
+    ),
+    ResourceInfo(
+        name="STTN",
+        filename="sttn.zip",
+        target_dir="models",
+        size_mb=200,
+        description="视频字幕擦除模型 (STTN 算法)",
+        check_paths=["models/sttn-auto", "models/sttn-det"],
+    ),
+    ResourceInfo(
+        name="V5 检测模型",
+        filename="v5-det.zip",
+        target_dir="models",
+        size_mb=350,
+        description="PP-OCRv5 文字检测模型",
+        check_paths=["models/V5"],
+    ),
+    ResourceInfo(
+        name="FFmpeg",
+        filename="ffmpeg-win64.zip",
+        target_dir="",
+        size_mb=364,
+        description="音视频处理工具",
+        check_paths=["ffmpeg"],
+    ),
+]
+
+
+def check_resources(base_dir: str) -> list[ResourceInfo]:
+    """检测所有资源文件的安装状态，返回带 installed 标记的副本列表"""
+    results: list[ResourceInfo] = []
+    for res in RESOURCE_DOWNLOADS:
+        info = ResourceInfo(
+            name=res.name,
+            filename=res.filename,
+            target_dir=res.target_dir,
+            size_mb=res.size_mb,
+            description=res.description,
+            check_paths=list(res.check_paths),
+        )
+        info.installed = all(
+            os.path.isdir(os.path.join(base_dir, p)) for p in res.check_paths
+        )
+        results.append(info)
+    return results
+
+
+class ResourceDownloader(QThread):
+    """资源文件下载器 —— 在后台线程中分块下载 zip 并解压"""
+
+    output_signal = Signal(str)
+    progress_signal = Signal(int)
+    finished_signal = Signal(bool, str)
+    resource_started_signal = Signal(str)
+
+    _CHUNK_SIZE = 64 * 1024  # 64 KB
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._resources: list[ResourceInfo] = []
+        self._base_dir: str = ""
+        self._mirror_base: str = ""
+        self._cancelled: bool = False
+
+    def setup(self, resources: list[ResourceInfo], base_dir: str,
+              mirror_name: str = DEFAULT_RESOURCE_MIRROR):
+        self._resources = resources
+        self._base_dir = base_dir
+        self._mirror_base = RESOURCE_MIRROR_PRESETS.get(
+            mirror_name, list(RESOURCE_MIRROR_PRESETS.values())[0]
+        )
+        self._cancelled = False
+
+    # -- QThread entry point --------------------------------------------------
+
+    def run(self):
+        total = len(self._resources)
+        if total == 0:
+            self.finished_signal.emit(True, "没有需要下载的资源")
+            return
+
+        has_error = False
+        for idx, res in enumerate(self._resources):
+            if self._cancelled:
+                break
+
+            self.resource_started_signal.emit(res.name)
+            self.output_signal.emit(f"\n{'=' * 50}")
+            self.output_signal.emit(
+                f"[{idx + 1}/{total}] 正在下载: {res.name}  (~{res.size_mb} MB)"
+            )
+
+            url = self._mirror_base + res.filename
+            self.output_signal.emit(f"URL: {url}")
+            self.output_signal.emit(f"{'=' * 50}\n")
+
+            try:
+                tmp_path = self._download_file(url, idx, total)
+                if self._cancelled:
+                    self._cleanup(tmp_path)
+                    break
+                self._extract_zip(tmp_path, res)
+                self._cleanup(tmp_path)
+                self.output_signal.emit(f"[完成] {res.name} 下载并解压成功\n")
+            except Exception as exc:
+                has_error = True
+                self.output_signal.emit(f"\n[错误] {res.name} 下载失败: {exc}")
+
+            overall = int((idx + 1) / total * 100)
+            self.progress_signal.emit(overall)
+
+        if self._cancelled:
+            self.finished_signal.emit(False, "用户取消下载")
+        elif has_error:
+            self.finished_signal.emit(False, "部分资源下载失败")
+        else:
+            self.finished_signal.emit(True, "所有资源下载完成")
+
+    # -- internal helpers -----------------------------------------------------
+
+    def _download_file(self, url: str, res_idx: int, total: int) -> str:
+        """下载单个文件到临时路径，返回临时文件路径"""
+        req = Request(url, headers={"User-Agent": "VSR-Downloader/1.0"})
+        resp = urlopen(req, timeout=30)
+        content_length = int(resp.headers.get("Content-Length", 0))
+
+        fd, tmp_path = tempfile.mkstemp(suffix=".zip")
+        try:
+            downloaded = 0
+            last_pct = -1
+            with os.fdopen(fd, "wb") as f:
+                while True:
+                    if self._cancelled:
+                        return tmp_path
+                    chunk = resp.read(self._CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    if content_length > 0:
+                        pct = int(downloaded / content_length * 100)
+                        if pct != last_pct:
+                            last_pct = pct
+                            speed_info = f"{downloaded / 1048576:.1f}/{content_length / 1048576:.1f} MB"
+                            self.output_signal.emit(
+                                f"  下载进度: {pct}%  ({speed_info})"
+                            )
+                            overall = int(
+                                (res_idx / total * 100) + (pct / total)
+                            )
+                            self.progress_signal.emit(min(overall, 99))
+        except Exception:
+            self._cleanup(tmp_path)
+            raise
+
+        return tmp_path
+
+    def _extract_zip(self, zip_path: str, res: ResourceInfo):
+        """解压 zip 到目标目录"""
+        extract_to = os.path.join(self._base_dir, res.target_dir) if res.target_dir else self._base_dir
+        os.makedirs(extract_to, exist_ok=True)
+
+        self.output_signal.emit(f"  正在解压到 {extract_to} ...")
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_to)
+        self.output_signal.emit("  解压完成")
+
+    @staticmethod
+    def _cleanup(path: str):
+        try:
+            if path and os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+    def cancel(self):
+        """取消下载"""
+        self._cancelled = True

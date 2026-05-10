@@ -10,6 +10,8 @@ _MODEL_NAME_MAP = {
 
 class ModelConfig:
     def __init__(self):
+        self.missing_models: list[str] = []
+
         self.LAMA_MODEL_DIR = os.path.join(BASE_DIR, 'models', 'big-lama')
         self.STTN_AUTO_MODEL_PATH = os.path.join(BASE_DIR, 'models', 'sttn-auto', 'infer_model.pth')
         self.STTN_DET_MODEL_PATH = os.path.join(BASE_DIR, 'models', 'sttn-det', 'sttn.pth')
@@ -22,5 +24,15 @@ class ModelConfig:
             raise ValueError(f"Invalid subtitle detect mode: {config.subtitleDetectMode.value}")
         self.DET_MODEL_NAME = _MODEL_NAME_MAP[config.subtitleDetectMode.value]
 
-        merge_big_file_if_not_exists(self.LAMA_MODEL_DIR, 'bit-lama.pt')
-        merge_big_file_if_not_exists(self.PROPAINTER_MODEL_DIR, 'ProPainter.pth')
+        if not os.path.isdir(self.LAMA_MODEL_DIR):
+            self.missing_models.append("Big-LAMA")
+        if not os.path.isdir(os.path.dirname(self.STTN_AUTO_MODEL_PATH)):
+            self.missing_models.append("STTN")
+        if not os.path.isdir(self.PROPAINTER_MODEL_DIR):
+            self.missing_models.append("ProPainter")
+        if not os.path.isdir(self.DET_MODEL_DIR):
+            self.missing_models.append("V5 检测模型")
+
+        if not self.missing_models:
+            merge_big_file_if_not_exists(self.LAMA_MODEL_DIR, 'bit-lama.pt')
+            merge_big_file_if_not_exists(self.PROPAINTER_MODEL_DIR, 'ProPainter.pth')

@@ -11,7 +11,7 @@
 ; ============================================================
 
 #define MyAppName "Video Subtitle Remover"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "VSR Team"
 #define MyAppURL "https://github.com/Kylin-li12138/video-subtitle-remover"
 #define MyAppExeName "启动程序.exe"
@@ -51,7 +51,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 ; 复制 QPT Release 目录，排除不需要的文件以减小体积和加速编译
-Source: "{#QPTReleaseDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__,*.pyc,\Python\Lib\idlelib\*,\Python\Lib\test\*,\Python\Lib\unittest\*,\Python\DLLs\tcl*.dll,\Python\DLLs\tk*.dll,\Python\DLLs\_tkinter.pyd"
+Source: "{#QPTReleaseDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__,*.pyc,\resources\backend\models\*,\resources\backend\ffmpeg\*,\resources\dist\*,\resources\test\*,\Python\Lib\idlelib\*,\Python\Lib\test\*,\Python\Lib\unittest\*,\Python\DLLs\tcl*.dll,\Python\DLLs\tk*.dll,\Python\DLLs\_tkinter.pyd"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

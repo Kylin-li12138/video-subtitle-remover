@@ -10,11 +10,13 @@ from qfluentwidgets import (ScrollArea, CardWidget, SubtitleLabel,
                            ComboBox, BodyLabel, CaptionLabel, StrongBodyLabel,
                            InfoBar, InfoBarPosition, PlainTextEdit)
 
-from backend.config import tr
+from backend.config import tr, BASE_DIR
 from backend.tools.dependency_manager import (
     detect_gpu, recommend_cuda_tag, check_dependencies,
     build_install_commands, DependencyInstaller, GpuInfo,
-    MIRROR_PRESETS, DEFAULT_MIRROR
+    MIRROR_PRESETS, DEFAULT_MIRROR,
+    check_resources, ResourceDownloader, ResourceInfo,
+    RESOURCE_MIRROR_PRESETS, DEFAULT_RESOURCE_MIRROR,
 )
 
 
@@ -95,6 +97,57 @@ class DependencyItemCard(CardWidget):
             self.action_btn.setEnabled(True)
 
 
+class ResourceItemCard(CardWidget):
+    """单个资源文件的卡片组件"""
+
+    download_clicked = Signal(object)
+
+    def __init__(self, res_info: ResourceInfo, parent=None):
+        super().__init__(parent)
+        self.res = res_info
+        self.setFixedHeight(64)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 8, 16, 8)
+        layout.setSpacing(12)
+
+        name_layout = QVBoxLayout()
+        name_layout.setSpacing(2)
+        self.name_label = StrongBodyLabel(self.res.name, self)
+        self.desc_label = CaptionLabel(
+            f"{self.res.description}  (~{self.res.size_mb} MB)", self
+        )
+        name_layout.addWidget(self.name_label)
+        name_layout.addWidget(self.desc_label)
+        layout.addLayout(name_layout, 1)
+
+        self.status_label = BodyLabel("", self)
+        self.status_label.setFixedWidth(120)
+        layout.addWidget(self.status_label)
+
+        self.action_btn = PushButton("下载", self)
+        self.action_btn.setFixedWidth(80)
+        self.action_btn.clicked.connect(lambda: self.download_clicked.emit(self.res))
+        layout.addWidget(self.action_btn)
+
+        self.update_status(self.res)
+
+    def update_status(self, res: ResourceInfo):
+        self.res = res
+        if res.installed:
+            self.status_label.setText("✓ 已下载")
+            self.status_label.setStyleSheet("color: #2ecc71;")
+            self.action_btn.setText("重新下载")
+            self.action_btn.setEnabled(True)
+        else:
+            self.status_label.setText("✗ 未下载")
+            self.status_label.setStyleSheet("color: #e74c3c;")
+            self.action_btn.setText("下载")
+            self.action_btn.setEnabled(True)
+
+
 class DependencyInterface(ScrollArea):
     """依赖安装界面"""
 
@@ -107,6 +160,10 @@ class DependencyInterface(ScrollArea):
         self._installer: DependencyInstaller = None
         self._dep_cards: list = []
         self._is_installing = False
+        self._resource_downloader: ResourceDownloader = None
+        self._resource_cards: list = []
+        self._resources: list = []
+        self._is_downloading = False
 
         self.__init_widgets()
         self._start_detection()
@@ -128,6 +185,8 @@ class DependencyInterface(ScrollArea):
         self._create_mirror_section()
         self._create_dep_section()
         self._create_action_section()
+        self._create_resource_section()
+        self._create_resource_action_section()
         self._create_log_section()
         self.expandLayout.addStretch(1)
 
@@ -218,6 +277,56 @@ class DependencyInterface(ScrollArea):
         self.progress_bar.setFixedHeight(4)
         self.expandLayout.addWidget(self.progress_bar)
 
+    def _create_resource_section(self):
+        """资源文件区域"""
+        title = SubtitleLabel(self._tr("ResourceFiles"), self.scrollWidget)
+        self.expandLayout.addWidget(title)
+
+        res_mirror_card = CardWidget(self.scrollWidget)
+        res_mirror_layout = QHBoxLayout(res_mirror_card)
+        res_mirror_layout.setContentsMargins(16, 12, 16, 12)
+        res_mirror_layout.setSpacing(12)
+
+        res_mirror_label = StrongBodyLabel(self._tr("ResourceMirror"), self.scrollWidget)
+        res_mirror_layout.addWidget(res_mirror_label)
+
+        self.res_mirror_combo = ComboBox(self.scrollWidget)
+        self.res_mirror_combo.addItems(list(RESOURCE_MIRROR_PRESETS.keys()))
+        self.res_mirror_combo.setCurrentText(DEFAULT_RESOURCE_MIRROR)
+        self.res_mirror_combo.setMinimumWidth(200)
+        res_mirror_layout.addWidget(self.res_mirror_combo)
+
+        res_mirror_tip = CaptionLabel(self._tr("ResourceMirrorTip"), self.scrollWidget)
+        res_mirror_layout.addWidget(res_mirror_tip, 1)
+
+        self.expandLayout.addWidget(res_mirror_card)
+
+        self.resource_list_layout = QVBoxLayout()
+        self.resource_list_layout.setSpacing(8)
+        placeholder = BodyLabel(self._tr("CheckingResources"), self.scrollWidget)
+        self.resource_list_layout.addWidget(placeholder)
+        self.expandLayout.addLayout(self.resource_list_layout)
+
+    def _create_resource_action_section(self):
+        """资源文件操作按钮"""
+        action_layout = QHBoxLayout()
+        action_layout.setSpacing(12)
+        action_layout.addStretch(1)
+
+        self.cancel_download_btn = PushButton(self._tr("Cancel"), self.scrollWidget)
+        self.cancel_download_btn.setVisible(False)
+        self.cancel_download_btn.clicked.connect(self._cancel_download)
+        action_layout.addWidget(self.cancel_download_btn)
+
+        self.download_all_btn = PrimaryPushButton(
+            FluentIcon.DOWNLOAD, self._tr("DownloadAll"), self.scrollWidget
+        )
+        self.download_all_btn.clicked.connect(self._download_all_missing)
+        self.download_all_btn.setEnabled(False)
+        action_layout.addWidget(self.download_all_btn)
+
+        self.expandLayout.addLayout(action_layout)
+
     def _create_log_section(self):
         """安装日志区域"""
         title = SubtitleLabel(self._tr("InstallLog"), self.scrollWidget)
@@ -294,6 +403,8 @@ class DependencyInterface(ScrollArea):
                 f"{self._tr('InstallAll')} ({len(missing)} {self._tr('Items')})"
             )
 
+        self._check_resources()
+
     def _install_single(self, dep):
         """安装单个依赖"""
         dep.installed = False
@@ -325,7 +436,7 @@ class DependencyInterface(ScrollArea):
             return
 
         self._is_installing = True
-        self._set_ui_installing(True)
+        self._set_ui_busy(True)
         self.log_text.clear()
 
         self._installer = DependencyInstaller(self)
@@ -361,7 +472,7 @@ class DependencyInterface(ScrollArea):
     def _on_install_finished(self, success: bool, message: str):
         """安装完成"""
         self._is_installing = False
-        self._set_ui_installing(False)
+        self._set_ui_busy(False)
 
         if success:
             InfoBar.success(
@@ -382,18 +493,129 @@ class DependencyInterface(ScrollArea):
 
         self._start_detection()
 
-    def _set_ui_installing(self, installing: bool):
-        """切换安装/非安装状态 UI"""
-        self.install_all_btn.setEnabled(not installing)
-        self.refresh_btn.setEnabled(not installing)
-        self.mirror_combo.setEnabled(not installing)
-        self.cancel_btn.setVisible(installing)
-        self.progress_bar.setVisible(installing)
-        if installing:
+    # -- 资源文件下载 -------------------------------------------------------
+
+    def _check_resources(self):
+        """检测资源文件是否已下载"""
+        resources = check_resources(BASE_DIR)
+        self._resources = resources
+
+        while self.resource_list_layout.count():
+            item = self.resource_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        self._resource_cards = []
+        for res in resources:
+            card = ResourceItemCard(res, self.scrollWidget)
+            card.download_clicked.connect(self._download_single)
+            self._resource_cards.append(card)
+            self.resource_list_layout.addWidget(card)
+
+        missing = [r for r in resources if not r.installed]
+        self.download_all_btn.setEnabled(len(missing) > 0)
+        if not missing:
+            self.download_all_btn.setText(self._tr("AllDownloaded"))
+        else:
+            self.download_all_btn.setText(
+                f"{self._tr('DownloadAll')} ({len(missing)} {self._tr('Items')})"
+            )
+
+    def _download_single(self, res: ResourceInfo):
+        """下载单个资源"""
+        self._run_download([res])
+
+    def _download_all_missing(self):
+        """下载所有缺失资源"""
+        missing = [r for r in self._resources if not r.installed]
+        if not missing:
+            InfoBar.success(
+                self._tr("AllDownloaded"),
+                self._tr("NothingToDownload"),
+                duration=3000,
+                parent=self,
+            )
+            return
+        self._run_download(missing)
+
+    def _run_download(self, resources: list):
+        """执行资源下载"""
+        if not resources:
+            return
+
+        self._is_downloading = True
+        self._set_ui_busy(True)
+        self.log_text.clear()
+
+        self._resource_downloader = ResourceDownloader(self)
+        self._resource_downloader.output_signal.connect(self._append_log)
+        self._resource_downloader.progress_signal.connect(self._update_progress)
+        self._resource_downloader.finished_signal.connect(self._on_download_finished)
+        self._resource_downloader.resource_started_signal.connect(
+            self._on_resource_started
+        )
+        self._resource_downloader.setup(
+            resources, BASE_DIR, self.res_mirror_combo.currentText()
+        )
+        self._resource_downloader.start()
+
+    def _cancel_download(self):
+        """取消下载"""
+        if self._resource_downloader:
+            self._resource_downloader.cancel()
+
+    def _on_resource_started(self, name: str):
+        """资源开始下载"""
+        for card in self._resource_cards:
+            if card.res.name == name:
+                card.action_btn.setEnabled(False)
+                card.action_btn.setText("下载中...")
+                break
+
+    def _on_download_finished(self, success: bool, message: str):
+        """下载完成"""
+        self._is_downloading = False
+        self._set_ui_busy(False)
+
+        if success:
+            InfoBar.success(
+                self._tr("DownloadSuccess"),
+                message,
+                duration=5000,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+        else:
+            InfoBar.warning(
+                self._tr("DownloadFailed"),
+                message,
+                duration=5000,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+
+        self._check_resources()
+
+    # -- UI 状态切换 --------------------------------------------------------
+
+    def _set_ui_busy(self, busy: bool):
+        """切换忙碌/空闲状态 UI"""
+        self.install_all_btn.setEnabled(not busy)
+        self.refresh_btn.setEnabled(not busy)
+        self.mirror_combo.setEnabled(not busy)
+        self.download_all_btn.setEnabled(not busy)
+        self.res_mirror_combo.setEnabled(not busy)
+
+        self.cancel_btn.setVisible(busy and self._is_installing)
+        self.cancel_download_btn.setVisible(busy and self._is_downloading)
+        self.progress_bar.setVisible(busy)
+        if busy:
             self.progress_bar.setValue(0)
 
         for card in self._dep_cards:
-            card.action_btn.setEnabled(not installing)
+            card.action_btn.setEnabled(not busy)
+        for card in self._resource_cards:
+            card.action_btn.setEnabled(not busy)
 
     def _tr(self, key: str) -> str:
         """获取翻译文本，若不存在则返回默认值"""
@@ -405,6 +627,10 @@ class DependencyInterface(ScrollArea):
     def has_missing_deps(self) -> bool:
         """是否有缺失的必要依赖"""
         return any(not d.installed and not d.is_optional for d in self._deps)
+
+    def has_missing_resources(self) -> bool:
+        """是否有缺失的资源文件"""
+        return any(not r.installed for r in self._resources)
 
 
 _FALLBACK_TR = {
@@ -431,4 +657,13 @@ _FALLBACK_TR = {
     "NoGpuHint": "请确认已安装 NVIDIA 驱动和 nvidia-smi",
     "MissingDepTitle": "缺少依赖",
     "MissingDepHint": "部分 AI 依赖未安装，请前往「依赖安装」页面安装",
+    "ResourceFiles": "资源文件 (模型 / FFmpeg)",
+    "ResourceMirror": "下载源",
+    "ResourceMirrorTip": "国内用户推荐使用 ghfast 加速镜像",
+    "CheckingResources": "正在检测资源文件...",
+    "DownloadAll": "一键下载全部",
+    "AllDownloaded": "所有资源已就绪",
+    "NothingToDownload": "无需下载任何资源",
+    "DownloadSuccess": "下载成功",
+    "DownloadFailed": "下载异常",
 }

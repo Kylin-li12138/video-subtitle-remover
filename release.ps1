@@ -58,7 +58,9 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "  提交失败！" -ForegroundColor Red
     exit 1
 }
+$ErrorActionPreference = "SilentlyContinue"
 git tag -d "v$newVersion" 2>$null
+$ErrorActionPreference = "Stop"
 git tag "v$newVersion"
 Write-Host "  tag v$newVersion 已创建"
 

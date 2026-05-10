@@ -305,6 +305,13 @@ def main():
         sub_modules=sub_modules,
     )
 
+    module.ignore_dirs.extend([
+        os.path.join(WORK_DIR, "backend", "models"),
+        os.path.join(WORK_DIR, "backend", "ffmpeg"),
+        os.path.join(WORK_DIR, "dist"),
+        os.path.join(WORK_DIR, "test"),
+    ])
+
     module.make()
 
     # --- QPT bug 修复: sitecustomize.py 中 os.environ.get("QPT_MODE") 可能返回 None ---
