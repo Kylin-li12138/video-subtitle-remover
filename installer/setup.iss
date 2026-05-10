@@ -13,7 +13,7 @@
 #define MyAppName "Video Subtitle Remover"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "VSR Team"
-#define MyAppURL "https://github.com/YaoFANGUK/video-subtitle-remover"
+#define MyAppURL "https://github.com/Kylin-li12138/video-subtitle-remover"
 #define MyAppExeName "启动程序.exe"
 
 ; QPT 打包输出的 Release 目录 (编译前请确认路径)
@@ -34,7 +34,7 @@ SetupIconFile=..\design\vsr.ico
 Compression=lzma2/fast
 SolidCompression=yes
 WizardStyle=modern
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
@@ -43,6 +43,7 @@ DisableDirPage=no
 DisableProgramGroupPage=yes
 
 [Languages]
+Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]

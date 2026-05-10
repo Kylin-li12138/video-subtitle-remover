@@ -215,10 +215,12 @@ def build_patch(from_ref: str, to_ref: str = "HEAD",
 
         result = subprocess.run(
             [str(iscc), str(iss_path)],
-            capture_output=True, text=True,
+            capture_output=True,
         )
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        stderr = result.stderr.decode("utf-8", errors="replace")
         if result.returncode != 0:
-            print(f"[错误] ISCC 编译失败:\n{result.stdout}\n{result.stderr}")
+            print(f"[错误] ISCC 编译失败:\n{stdout}\n{stderr}")
             shutil.rmtree(staging_dir, ignore_errors=True)
             return zip_path
 

@@ -3,34 +3,31 @@
 <div align="center">
   <img src="design/icon_1024.PNG" alt="VSR Logo" width="128" height="128">
 </div>
-<div align="center">
-<a href="https://trendshift.io/repositories/9120" target="_blank"><img src="https://trendshift.io/api/badge/repositories/9120" alt="YaoFANGUK%2Fvideo-subtitle-remover | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-</div>
 
 ## 项目简介
 
 ![License](https://img.shields.io/badge/License-Apache%202-red.svg)
 ![python version](https://img.shields.io/badge/Python-3.11+-blue.svg)
 ![support os](https://img.shields.io/badge/OS-Windows/macOS/Linux-green.svg)
-[![Docker](https://img.shields.io/badge/Docker-Image-blue?logo=docker)](https://hub.docker.com/r/eritpchy/video-subtitle-remover)
+[![Docker](https://img.shields.io/badge/Docker-Image-blue?logo=docker)](https://github.com/Kylin-li12138/video-subtitle-remover/releases)
 
 Video-subtitle-remover (VSR) 是一款基于AI技术，将视频中的硬字幕去除的软件。
 主要实现了以下功能：
 - **无损分辨率**将视频中的硬字幕去除，生成去除字幕后的文件
 - 通过超强AI算法模型，对去除字幕文本的区域进行填充（非相邻像素填充与马赛克去除）
-- 提取原视频字幕，可配合：[video-subtitle-extractor (VSE)](https://github.com/YaoFANGUK/video-subtitle-extractor)
+- 提取原视频字幕
 - 支持自定义字幕位置，仅去除定义位置中的字幕（传入位置）
 - 支持全视频自动去除所有文本（不传入位置）
 - 支持多选图片批量去除水印文本
 
-![demo.png](https://github.com/YaoFANGUK/video-subtitle-remover/raw/main/design/demo.png)
+![demo.png](design/demo.png)
 
 **使用说明：**
 
 - 有使用问题请加群讨论，QQ群：210150985（已满）、806152575（已满）、816881808（已满）、295894827
 - 直接下载压缩包解压运行，如果不能运行再按照下面的教程，尝试源码安装conda环境运行
 
-**下载地址：**<a href="https://github.com/YaoFANGUK/video-subtitle-remover/releases">Release</a>
+**下载地址：**<a href="https://github.com/Kylin-li12138/video-subtitle-remover/releases">Release</a>
 
 **预构建包对比说明**：
 
@@ -44,26 +41,6 @@ Video-subtitle-remover (VSR) 是一款基于AI技术，将视频中的硬字幕�
 
 > NVIDIA官方提供了各GPU型号的计算能力列表，您可以参考链接: [CUDA GPUs](https://developer.nvidia.com/cuda-gpus) 查看你的GPU适合哪个CUDA版本
 
-**Docker版本：**
-```shell
-  # Nvidia 10 20 30系显卡
-  docker run -it --name vsr --gpus all eritpchy/video-subtitle-remover:1.4.0-cuda11.8 python backend/main.py -i test/test.mp4 -o test/test_no_sub.mp4
-
-  # Nvidia 40系显卡
-  docker run -it --name vsr --gpus all eritpchy/video-subtitle-remover:1.4.0-cuda12.6 python backend/main.py -i test/test.mp4 -o test/test_no_sub.mp4
-
-  # Nvidia 50系显卡
-  docker run -it --name vsr --gpus all eritpchy/video-subtitle-remover:1.4.0-cuda12.8 python backend/main.py -i test/test.mp4 -o test/test_no_sub.mp4
-
-  # AMD / Intel 独显 集显
-  docker run -it --name vsr --gpus all eritpchy/video-subtitle-remover:1.4.0-directml python backend/main.py -i test/test.mp4 -o test/test_no_sub.mp4
-
-  # CPU
-  docker run -it --name vsr --gpus all eritpchy/video-subtitle-remover:1.4.0-cpu python backend/main.py -i test/test.mp4 -o test/test_no_sub.mp4
-
-  # 导出视频
-  docker cp vsr:/vsr/test/test_no_sub.mp4 ./
-```
 
 **命令行参数：**
 ```
@@ -84,9 +61,9 @@ options:
 
 - GUI版：
 
-<p style="text-align:center;"><img src="https://github.com/YaoFANGUK/video-subtitle-remover/raw/main/design/demo2.gif" alt="demo2.gif"/></p>
+<p style="text-align:center;"><img src="design/demo2.gif" alt="demo2.gif"/></p>
 
-<p style="text-align:center;"><a href="https://b23.tv/guEbl9C"><img src="https://github.com/YaoFANGUK/video-subtitle-remover/raw/main/design/demo.gif" alt="demo.gif"/></a></p>
+<p style="text-align:center;"><img src="design/demo.gif" alt="demo.gif"/></p>
 
 ## 源码使用说明
 
@@ -269,6 +246,3 @@ LAMA_SUPER_FAST = False  # 保证效果
 解决方案：打开控制台输入`softwareupdate --install-rosetta` 安装rosetta
 
 
-## 赞助
-
-<img src="https://github.com/YaoFANGUK/video-subtitle-extractor/raw/main/design/sponsor.png" width="600">

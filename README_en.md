@@ -3,16 +3,13 @@
 <div align="center">
   <img src="design/icon_1024.PNG" alt="VSR Logo" width="128" height="128">
 </div>
-<div align="center">
-<a href="https://trendshift.io/repositories/9120" target="_blank"><img src="https://trendshift.io/api/badge/repositories/9120" alt="YaoFANGUK%2Fvideo-subtitle-remover | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-</div>
 
 ## Project Introduction
 
 ![License](https://img.shields.io/badge/License-Apache%202-red.svg)
 ![python version](https://img.shields.io/badge/Python-3.11+-blue.svg)
 ![support os](https://img.shields.io/badge/OS-Windows/macOS/Linux-green.svg)
-[![Docker](https://img.shields.io/badge/Docker-Image-blue?logo=docker)](https://hub.docker.com/r/eritpchy/video-subtitle-remover)
+[![Docker](https://img.shields.io/badge/Docker-Image-blue?logo=docker)](https://github.com/Kylin-li12138/video-subtitle-remover/releases)
 
 Video-subtitle-remover (VSR) is an AI-based software that removes hardcoded subtitles from videos.
 It mainly implements the following functionalities:
@@ -22,14 +19,14 @@ It mainly implements the following functionalities:
 - Supports automatic removal of all text throughout the entire video (without inputting a position)
 - Supports multi-selection of images for batch removal of watermark text
 
-![demo.png](https://github.com/YaoFANGUK/video-subtitle-remover/raw/main/design/demo.png)
+![demo.png](design/demo.png)
 
 **Instructions:**
 
 - If you have questions, please join the discussion group: QQ Group 210150985 (full), 806152575 (full), 816881808 (full), 295894827
 - Download the compressed package, extract and run it directly. If it cannot run, follow the tutorial below to try installing from source
 
-**Download:** <a href="https://github.com/YaoFANGUK/video-subtitle-remover/releases">Release</a>
+**Download:** <a href="https://github.com/Kylin-li12138/video-subtitle-remover/releases">Release</a>
 
 **Pre-built Package Comparison**:
 
@@ -43,26 +40,6 @@ It mainly implements the following functionalities:
 
 > NVIDIA provides a list of compute capabilities for each GPU model. Refer to [CUDA GPUs](https://developer.nvidia.com/cuda-gpus) to check which CUDA version is compatible with your GPU.
 
-**Docker Versions:**
-```shell
-  # Nvidia 10, 20, 30 Series Graphics Cards
-  docker run -it --name vsr --gpus all eritpchy/video-subtitle-remover:1.4.0-cuda11.8 python backend/main.py -i test/test.mp4 -o test/test_no_sub.mp4
-
-  # Nvidia 40 Series Graphics Cards
-  docker run -it --name vsr --gpus all eritpchy/video-subtitle-remover:1.4.0-cuda12.6 python backend/main.py -i test/test.mp4 -o test/test_no_sub.mp4
-
-  # Nvidia 50 Series Graphics Cards
-  docker run -it --name vsr --gpus all eritpchy/video-subtitle-remover:1.4.0-cuda12.8 python backend/main.py -i test/test.mp4 -o test/test_no_sub.mp4
-
-  # AMD / Intel Dedicated or Integrated Graphics
-  docker run -it --name vsr --gpus all eritpchy/video-subtitle-remover:1.4.0-directml python backend/main.py -i test/test.mp4 -o test/test_no_sub.mp4
-
-  # CPU
-  docker run -it --name vsr --gpus all eritpchy/video-subtitle-remover:1.4.0-cpu python backend/main.py -i test/test.mp4 -o test/test_no_sub.mp4
-
-  # Export video
-  docker cp vsr:/vsr/test/test_no_sub.mp4 ./
-```
 
 **Command Line:**
 ```
@@ -83,9 +60,9 @@ options:
 
 - GUI:
 
-<p style="text-align:center;"><img src="https://github.com/YaoFANGUK/video-subtitle-remover/raw/main/design/demo2.gif" alt="demo2.gif"/></p>
+<p style="text-align:center;"><img src="design/demo2.gif" alt="demo2.gif"/></p>
 
-<p style="text-align:center;"><a href="https://b23.tv/guEbl9C"><img src="https://github.com/YaoFANGUK/video-subtitle-remover/raw/main/design/demo.gif" alt="demo.gif"/></a></p>
+<p style="text-align:center;"><img src="design/demo.gif" alt="demo.gif"/></p>
 
 ## Source Code Usage Instructions
 
@@ -264,6 +241,3 @@ LAMA_SUPER_FAST = False  # Ensure quality
 Solution: Upgrade the 7-zip extraction program to the latest version.
 
 
-## Sponsor
-
-<img src="https://github.com/YaoFANGUK/video-subtitle-extractor/raw/main/design/sponsor.png" width="600">

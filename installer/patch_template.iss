@@ -38,8 +38,10 @@ DisableReadyPage=yes
 DisableFinishedPage=yes
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
+Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
+Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 
 [Files]
 ; 补丁文件 - 只覆盖到 resources 子目录

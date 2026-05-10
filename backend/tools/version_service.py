@@ -2,16 +2,13 @@
 """
 版本检查与自动更新服务
 
-支持两种更新源:
-    1. Electron Release Server (Squirrel 协议) - 优先
-       URL: https://cmupdate.mengjun.icu/update/remover/win64
-    2. GitHub Releases API - 备用
+更新源: Electron Release Server (electron-updater 协议)
+    GET /update/flavor/remover/windows_64/latest.yml
 
 更新流程:
     检查新版本 → 下载补丁 .exe → 静默运行 → 提示重启
 """
 
-import json
 import os
 import re
 import subprocess
@@ -21,10 +18,11 @@ import tempfile
 import requests
 from PySide6.QtCore import QVersionNumber
 
-from backend.config import VERSION, PROJECT_UPDATE_URLS, tr
+from backend.config import VERSION, tr
 
-# Electron Release Server 地址
-ERS_UPDATE_URL = "https://cmupdate.mengjun.icu/update/remover/win64"
+ERS_BASE_URL = "https://cmupdate.mengjun.icu"
+ERS_FLAVOR = "remover"
+ERS_PLATFORM = "windows_64"
 
 
 class VersionService:
@@ -33,7 +31,6 @@ class VersionService:
         self.current_version = VERSION
         self.lastest_version = VERSION
         self.version_pattern = re.compile(r'v*((\d+)\.(\d+)\.(\d+))')
-        self.github_api_endpoints = PROJECT_UPDATE_URLS
         self._download_url: str | None = None
         self._download_name: str | None = None
 
@@ -56,96 +53,72 @@ class VersionService:
     # ------------------------------------------------------------------
 
     def get_latest_version(self) -> str:
-        """依次查询 Electron Release Server 和 GitHub，返回最新版本号"""
+        """查询 Electron Release Server REST API 获取最新版本号"""
         ver = self._check_ers()
         if ver:
             return ver
-        return self._check_github()
+        return VERSION
 
     def has_new_version(self) -> bool:
         latest = QVersionNumber.fromString(self.get_latest_version())
         current = QVersionNumber.fromString(self.current_version)
         return latest > current
 
-    # --- Electron Release Server (Squirrel 协议) ---
+    # --- Electron Release Server (electron-updater 协议) ---
 
     def _check_ers(self) -> str | None:
         """
-        Squirrel.Windows 协议:
-            GET /update/remover/win64/RELEASES?id=remover&localVersion={ver}&arch=x64
-        如果有新版本, 返回 RELEASES 内容 (包含 nupkg/exe 下载信息)
-        如果返回 "Version not found" 或 204, 说明无更新
+        electron-updater 协议:
+            GET /update/flavor/remover/windows_64/latest.yml
+        返回 YAML 格式:
+            version: x.y.z
+            files:
+              - url: /download/flavor/remover/x.y.z/windows_64/filename.exe
+                sha512: ...
+                size: ...
+            path: /download/flavor/remover/x.y.z/windows_64/filename.exe
         """
         try:
-            url = f"{ERS_UPDATE_URL}/RELEASES"
-            params = {
-                "id": "remover",
-                "localVersion": self.current_version,
-                "arch": "x64",
-            }
-            resp = requests.get(url, params=params, headers=self._headers(),
-                                proxies=self._proxies(), timeout=10)
+            url = (f"{ERS_BASE_URL}/update/flavor/{ERS_FLAVOR}"
+                   f"/{ERS_PLATFORM}/latest.yml")
+            resp = requests.get(url, headers=self._headers(),
+                                proxies=self._proxies(), timeout=15)
 
-            if resp.status_code == 204:
+            if resp.status_code != 200:
                 return None
 
             body = resp.text.strip()
-            if not body or "not found" in body.lower():
+            if not body:
                 return None
 
-            # RELEASES 文件格式: SHA1 filename size
-            # 例: ABC123 remover-1.5.0-full.exe 12345
-            for line in body.splitlines():
-                parts = line.strip().split()
-                if len(parts) >= 2:
-                    filename = parts[1]
-                    match = self.version_pattern.search(filename)
-                    if match:
-                        self.lastest_version = match.group(1)
-                        base = ERS_UPDATE_URL.rstrip("/")
-                        self._download_url = f"{base}/{filename}"
-                        self._download_name = filename
-                        self._log_version()
-                        return self.lastest_version
+            ver_match = re.search(r'version:\s*(\S+)', body)
+            if not ver_match:
+                return None
 
-            return None
+            latest_ver = ver_match.group(1)
+            qver_latest = QVersionNumber.fromString(latest_ver)
+            qver_current = QVersionNumber.fromString(self.current_version)
+            if qver_latest <= qver_current:
+                return None
+
+            path_match = re.search(r'(?:path|url):\s*(/download/\S+\.exe)', body)
+            if path_match:
+                rel_path = path_match.group(1)
+                self._download_url = f"{ERS_BASE_URL}{rel_path}"
+                self._download_name = rel_path.rsplit("/", 1)[-1]
+            else:
+                self._download_url = (
+                    f"{ERS_BASE_URL}/download/flavor/{ERS_FLAVOR}"
+                    f"/{latest_ver}/{ERS_PLATFORM}")
+                self._download_name = f"patch-v{latest_ver}.exe"
+
+            self.lastest_version = latest_ver
+            self._log_version()
+            return latest_ver
+
         except Exception as e:
             print(f"[Update] Electron Release Server 检查失败: {e}")
             return None
-
-    # --- GitHub Releases ---
-
-    def _check_github(self) -> str:
-        for url in self.github_api_endpoints:
-            try:
-                resp = requests.get(url, headers=self._headers(),
-                                    proxies=self._proxies(), timeout=10,
-                                    allow_redirects=True)
-                resp.raise_for_status()
-                data = resp.json()
-
-                tag = data.get("tag_name", "")
-                match = self.version_pattern.search(tag)
-                if not match:
-                    continue
-
-                self.lastest_version = match.group(1)
-
-                # 在 assets 中找补丁 .exe
-                for asset in data.get("assets", []):
-                    name = asset.get("name", "")
-                    if name.startswith("patch-") and name.endswith(".exe"):
-                        self._download_url = asset.get("browser_download_url")
-                        self._download_name = name
-                        break
-
-                self._log_version()
-                return self.lastest_version
-            except Exception as e:
-                print(tr['VersionService']['RequestError'].format(url, str(e)))
-                continue
-
-        return VERSION
 
     def _log_version(self):
         try:

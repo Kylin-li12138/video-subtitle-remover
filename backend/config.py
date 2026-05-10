@@ -1,4 +1,4 @@
-
+﻿
 import os
 from pathlib import Path
 from qfluentwidgets import (qconfig, ConfigItem, QConfig, OptionsValidator, BoolValidator, OptionsConfigItem, 
@@ -11,7 +11,6 @@ VERSION = "1.0.1"
 PROJECT_HOME_URL = "https://github.com/Kylin-li12138/video-subtitle-remover"
 PROJECT_ISSUES_URL = PROJECT_HOME_URL + "/issues"
 PROJECT_RELEASES_URL = PROJECT_HOME_URL + "/releases"
-PROJECT_UPDATE_URLS = [] 
 
 # 硬件加速选项开关
 HARDWARD_ACCELERATION_OPTION = True
@@ -105,7 +104,28 @@ class Config(QConfig):
     # 视频保存目录
     saveDirectory = ConfigItem("Main", "SaveDirectory", "", ConfigValidator())
 
-CONFIG_FILE = 'config/config.json'
+def _get_config_path() -> str:
+    local_path = os.path.join('config', 'config.json')
+    local_dir = os.path.dirname(local_path)
+    try:
+        os.makedirs(local_dir, exist_ok=True)
+        probe = os.path.join(local_dir, '.probe')
+        with open(probe, 'w') as f:
+            f.write('')
+        os.remove(probe)
+        return local_path
+    except OSError:
+        pass
+    appdata = os.environ.get('APPDATA') or os.path.expanduser('~')
+    cfg_dir = os.path.join(appdata, 'Video Subtitle Remover')
+    os.makedirs(cfg_dir, exist_ok=True)
+    target = os.path.join(cfg_dir, 'config.json')
+    if not os.path.exists(target) and os.path.exists(local_path):
+        import shutil
+        shutil.copy2(local_path, target)
+    return target
+
+CONFIG_FILE = _get_config_path()
 config = Config()
 qconfig.load(CONFIG_FILE, config)
 

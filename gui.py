@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-@Author  : Fang Yao（原作者） / 改写：Jason Eric
-@Time    : 2023/4/1 6:07 下午（原始时间）
 @FileName: gui.py
-@desc: 字幕去除器图形化界面（由 PySimpleGUI 改写为 PySide6）
+@desc: 字幕去除器图形化界面 (PySide6)
 """
 
 import sys
