@@ -149,6 +149,8 @@ def build_patch(from_ref: str, to_ref: str = "HEAD",
     from_version = from_ref.lstrip("v")
 
     changed = get_changed_files(from_ref, to_ref)
+    if "backend/config.py" not in changed:
+        changed.append("backend/config.py")
     if not changed:
         print("没有需要更新的源文件。")
         return None
