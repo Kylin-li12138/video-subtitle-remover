@@ -574,21 +574,25 @@ class ResourceDownloader(QThread):
 
     def _download_file_resource(self, res: ResourceInfo, idx: int, total: int):
         dest_base = os.path.join(self._base_dir, res.target_dir) if res.target_dir else self._base_dir
-        os.makedirs(dest_base, exist_ok=True)
-        for fi, (url, rel_path) in enumerate(res.files):
-            if self._cancelled:
-                return
-            url = self._apply_proxy(url)
-            fname = rel_path or url.rsplit("/", 1)[-1]
-            self.output_signal.emit(f"  [{fi+1}/{len(res.files)}] {fname}")
-            dest = os.path.join(dest_base, fname)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            tmp_path = self._download_file(url, idx, total)
-            if self._cancelled:
-                self._cleanup(tmp_path)
-                return
-            shutil.move(tmp_path, dest)
-            self.output_signal.emit(f"        -> {dest}")
+        staging = tempfile.mkdtemp(prefix="vsr_dl_")
+        try:
+            for fi, (url, rel_path) in enumerate(res.files):
+                if self._cancelled:
+                    return
+                url = self._apply_proxy(url)
+                fname = rel_path or url.rsplit("/", 1)[-1]
+                self.output_signal.emit(f"  [{fi+1}/{len(res.files)}] {fname}")
+                tmp_path = self._download_file(url, idx, total)
+                if self._cancelled:
+                    self._cleanup(tmp_path)
+                    return
+                staged = os.path.join(staging, fname)
+                os.makedirs(os.path.dirname(staged), exist_ok=True)
+                shutil.move(tmp_path, staged)
+
+            self._copy_to_target(staging, dest_base)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     # -- internal helpers -----------------------------------------------------
 
@@ -632,27 +636,64 @@ class ResourceDownloader(QThread):
         return tmp_path
 
     def _extract_zip(self, zip_path: str, res: ResourceInfo):
-        """解压 zip 到目标目录，自动处理嵌套顶层目录"""
+        """解压 zip 到目标目录，自动处理嵌套顶层目录和权限提升"""
         extract_to = os.path.join(self._base_dir, res.target_dir) if res.target_dir else self._base_dir
-        os.makedirs(extract_to, exist_ok=True)
 
-        self.output_signal.emit(f"  正在解压到 {extract_to} ...")
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            names = zf.namelist()
-            top_dirs = {n.split("/")[0] for n in names if "/" in n}
+        staging = tempfile.mkdtemp(prefix="vsr_res_")
+        try:
+            self.output_signal.emit(f"  正在解压...")
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                names = zf.namelist()
+                top_dirs = {n.split("/")[0] for n in names if "/" in n}
 
-            if res.name == "FFmpeg" and len(top_dirs) == 1:
-                tmp_extract = os.path.join(self._base_dir, "__ffmpeg_tmp__")
-                zf.extractall(tmp_extract)
-                nested = os.path.join(tmp_extract, top_dirs.pop())
-                dest = os.path.join(self._base_dir, "ffmpeg")
-                if os.path.exists(dest):
-                    shutil.rmtree(dest)
-                shutil.move(nested, dest)
-                shutil.rmtree(tmp_extract, ignore_errors=True)
-            else:
-                zf.extractall(extract_to)
-        self.output_signal.emit("  解压完成")
+                if res.name == "FFmpeg" and len(top_dirs) == 1:
+                    zf.extractall(staging)
+                    nested = os.path.join(staging, top_dirs.pop())
+                    final_staging = os.path.join(staging, "_final")
+                    os.makedirs(final_staging, exist_ok=True)
+                    shutil.move(nested, os.path.join(final_staging, "ffmpeg"))
+                    staging_src = final_staging
+                    dest_dir = self._base_dir
+                else:
+                    zf.extractall(staging)
+                    staging_src = staging
+                    dest_dir = extract_to
+
+            self._copy_to_target(staging_src, dest_dir)
+            self.output_signal.emit("  解压完成")
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def _copy_to_target(self, src: str, dst: str):
+        """复制文件到目标目录，权限不足时自动提权"""
+        try:
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+        except PermissionError:
+            self.output_signal.emit("  目标目录需要管理员权限，正在提权...")
+            self._elevated_copy(src, dst)
+
+    def _elevated_copy(self, src: str, dst: str):
+        """通过 UAC 提权复制目录"""
+        bat_fd, bat_path = tempfile.mkstemp(suffix=".bat")
+        try:
+            with os.fdopen(bat_fd, "w") as f:
+                f.write(f'@robocopy "{src}" "{dst}" /E /NFL /NDL /NJH /NJS /R:1 /W:1\n')
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"Start-Process -FilePath '{bat_path}' -Verb RunAs -Wait"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode not in (0, None):
+                self.output_signal.emit(f"  提权复制返回码: {result.returncode}")
+        except subprocess.TimeoutExpired:
+            raise PermissionError("提权复制超时")
+        except Exception as e:
+            raise PermissionError(f"提权复制失败: {e}")
+        finally:
+            try:
+                os.remove(bat_path)
+            except OSError:
+                pass
 
     @staticmethod
     def _cleanup(path: str):
