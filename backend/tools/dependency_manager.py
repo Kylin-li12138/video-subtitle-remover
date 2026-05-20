@@ -250,6 +250,37 @@ def build_install_commands(deps: list, mirror_name: str = DEFAULT_MIRROR, cuda_t
                 "-i", paddle_index,
                 "--trusted-host", _extract_host(paddle_index),
             ]
+        elif dep.package_name == "paddleocr":
+            # paddleocr → paddlex[ocr-core] → opencv-contrib-python
+            # opencv-contrib-python tries to overwrite cv2.pyd which is locked
+            # by the running application on Windows.
+            # Split into: paddleocr --no-deps → paddlex base → remaining extras.
+            commands.append((dep, [
+                sys.executable, "-m", "pip", "install",
+                f"{dep.package_name}=={dep.required_version}",
+                "--no-deps",
+                "-i", pypi_index,
+                "--trusted-host", _extract_host(pypi_index),
+            ]))
+            commands.append((DependencyStatus(
+                name="PaddleX", package_name="paddlex",
+                required_version="3.4.0",
+            ), [
+                sys.executable, "-m", "pip", "install",
+                "paddlex>=3.4.0,<3.5.0",
+                "-i", pypi_index,
+                "--trusted-host", _extract_host(pypi_index),
+            ]))
+            commands.append((DependencyStatus(
+                name="OCR Extras", package_name="imagesize",
+                required_version="",
+            ), [
+                sys.executable, "-m", "pip", "install",
+                "imagesize", "pyclipper", "pypdfium2", "python-bidi", "shapely",
+                "-i", pypi_index,
+                "--trusted-host", _extract_host(pypi_index),
+            ]))
+            continue
         elif dep.package_name == "onnxruntime-directml":
             cmd = [
                 sys.executable, "-m", "pip", "install",
@@ -387,9 +418,13 @@ RESOURCE_MIRROR_PRESETS = {
         "hf_mirror": "https://hf-mirror.com",
         "gh_proxy": "https://ghfast.top/",
     },
-    "ghfast 全局加速": {
-        "hf_mirror": "",
-        "gh_proxy": "https://ghfast.top/",
+    "gh-proxy.com 国内镜像": {
+        "hf_mirror": "https://hf-mirror.com",
+        "gh_proxy": "https://gh-proxy.com/",
+    },
+    "ghproxy.net 国内镜像": {
+        "hf_mirror": "https://hf-mirror.com",
+        "gh_proxy": "https://ghproxy.net/",
     },
     "直连 (海外用户)": {
         "hf_mirror": "",
