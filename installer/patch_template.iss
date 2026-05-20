@@ -6,7 +6,7 @@
 ;
 ; 特性:
 ;   - 静默安装: /VERYSILENT 无任何弹窗
-;   - 自动检测安装目录 (从注册表或命令行 /DIR=)
+;   - 自动检测安装目录 (从注册表或扫描磁盘)
 ;   - 仅覆盖源文件，不碰 Python 运行时和依赖
 ; ============================================================
 
@@ -18,7 +18,7 @@
 AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
 AppName={#MyAppName} Patch
 AppVersion={#MyAppVersion}
-DefaultDirName={reg:HKCU\Software\Video Subtitle Remover,InstallPath|{autopf}\{#MyAppName}}
+DefaultDirName={code:FindInstallDir}
 ; 补丁不需要开始菜单、卸载项
 CreateUninstallRegKey=no
 UpdateUninstallLogAppName=no
@@ -53,6 +53,48 @@ Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 {{FILE_ENTRIES}}
 
 [Code]
+function FindInstallDir(Param: String): String;
+var
+  RegPath: String;
+  I: Integer;
+  DriveLetter: String;
+  TestPath: String;
+begin
+  // 1. Registry
+  if RegQueryStringValue(HKEY_CURRENT_USER,
+       'Software\Video Subtitle Remover', 'InstallPath', RegPath) then
+  begin
+    if DirExists(RegPath) then
+    begin
+      Result := RegPath;
+      Exit;
+    end;
+  end;
+
+  // 2. Scan C-G drives for the actual install
+  for I := 0 to 4 do
+  begin
+    case I of
+      0: DriveLetter := 'C';
+      1: DriveLetter := 'D';
+      2: DriveLetter := 'E';
+      3: DriveLetter := 'F';
+      4: DriveLetter := 'G';
+    end;
+    TestPath := DriveLetter + ':\Program Files\Video Subtitle Remover';
+    if FileExists(TestPath + '\resources\backend\config.py') then
+    begin
+      Result := TestPath;
+      RegWriteStringValue(HKEY_CURRENT_USER,
+        'Software\Video Subtitle Remover', 'InstallPath', Result);
+      Exit;
+    end;
+  end;
+
+  // 3. Fallback
+  Result := ExpandConstant('{autopf}\Video Subtitle Remover');
+end;
+
 function GetResourcesDir(Value: String): String;
 begin
   Result := ExpandConstant('{app}') + '\resources';
@@ -90,6 +132,8 @@ begin
   begin
     RegWriteStringValue(HKEY_CURRENT_USER, 'Software\Video Subtitle Remover',
       'AppVersion', '{#MyAppVersion}');
+    RegWriteStringValue(HKEY_CURRENT_USER, 'Software\Video Subtitle Remover',
+      'InstallPath', ExpandConstant('{app}'));
     DeletePycacheRecursive(ExpandConstant('{app}') + '\resources');
   end;
 end;
