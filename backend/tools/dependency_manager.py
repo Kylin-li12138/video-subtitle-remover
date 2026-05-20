@@ -524,7 +524,9 @@ def check_resources(base_dir: str) -> list[ResourceInfo]:
         )
         if res.check_paths:
             info.installed = all(
-                os.path.isdir(os.path.join(base_dir, p)) for p in res.check_paths
+                os.path.isdir(d) and any(os.scandir(d))
+                for p in res.check_paths
+                for d in [os.path.join(base_dir, p)]
             )
         else:
             info.installed = True

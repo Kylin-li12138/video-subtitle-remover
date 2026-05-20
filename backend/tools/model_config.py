@@ -33,5 +33,5 @@ class ModelConfig:
             self.missing_models.append("ProPainter")
 
         if not self.missing_models:
-            merge_big_file_if_not_exists(self.LAMA_MODEL_DIR, 'bit-lama.pt')
+            merge_big_file_if_not_exists(self.LAMA_MODEL_DIR, 'big-lama.pt')
             merge_big_file_if_not_exists(self.PROPAINTER_MODEL_DIR, 'ProPainter.pth')
