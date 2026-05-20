@@ -8,7 +8,7 @@ from backend.tools.constant import InpaintMode, SubtitleDetectMode
 import configparser
 
 # 项目版本号 —— 优先从注册表读取（补丁安装时会更新注册表）
-_BUILTIN_VERSION = "1.2.4"
+_BUILTIN_VERSION = "1.2.5"
 
 def _get_version() -> str:
     if sys.platform == "win32":

@@ -31,6 +31,9 @@ WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; 安装前自动关闭正在运行的程序
+CloseApplications=force
+CloseApplicationsFilter=*.exe
 
 ; 默认静默模式
 DisableDirPage=yes
@@ -57,12 +60,36 @@ begin
     Result := ExpandConstant('{app}');
 end;
 
+procedure DeletePycacheRecursive(Dir: String);
+var
+  FindRec: TFindRec;
+begin
+  if FindFirst(Dir + '\*', FindRec) then
+  begin
+    try
+      repeat
+        if (FindRec.Name = '.') or (FindRec.Name = '..') then
+          Continue;
+        if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+        begin
+          if FindRec.Name = '__pycache__' then
+            DelTree(Dir + '\' + FindRec.Name, True, True, True)
+          else
+            DeletePycacheRecursive(Dir + '\' + FindRec.Name);
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
-    // 更新版本号到注册表
     RegWriteStringValue(HKEY_CURRENT_USER, 'Software\Video Subtitle Remover',
       'AppVersion', '{#MyAppVersion}');
+    DeletePycacheRecursive(ExpandConstant('{app}') + '\resources');
   end;
 end;
